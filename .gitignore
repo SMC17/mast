@@ -1,0 +1,24 @@
+# Zig
+.zig-cache/
+zig-out/
+*.o
+*.a
+*.so
+*.dylib
+
+# Build artifacts
+build/
+dist/
+
+# Editor
+*~
+.swp
+.swo
+.DS_Store
+
+# Session audit logs (local-only by design)
+*.session.jsonl
+
+# Misc
+.envrc
+.direnv/
