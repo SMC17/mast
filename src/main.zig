@@ -19,10 +19,9 @@
 const std = @import("std");
 const Buffer = @import("buffer.zig").Buffer;
 const SessionAudit = @import("audit.zig").SessionAudit;
+const sandbox = @import("sandbox.zig");
 
-const janet = @cImport({
-    @cInclude("janet.h");
-});
+const janet = @import("janet_c.zig").c;
 
 const libc = @cImport({
     @cInclude("unistd.h");
@@ -57,16 +56,10 @@ fn cmd_stax_pid(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     return janet.janet_wrap_integer(pid);
 }
 
-fn cmd_stax_bash(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
-    if (argc != 1) {
-        janet.janet_panicf("stax-bash: expected 1 argument, got %d", argc);
-    }
-    const arg = argv[0];
-    const s_ptr = janet.janet_unwrap_string(arg);
-    const c_str = @as([*c]const u8, @ptrCast(s_ptr));
-    const rc: i32 = @intCast(libc.system(c_str));
-    return janet.janet_wrap_integer(rc);
-}
+// NOTE: `stax-bash` is registered against `sandbox.gated_stax_bash`, which
+// consults the host capability set before shelling out. The legacy
+// pass-through implementation was removed in the sandbox slice — see
+// docs/SANDBOX_THREAT_MODEL.md §3 (capability vocabulary, `exec`).
 
 /// `(buffer-name)` — current buffer name, or nil if no buffer is open.
 fn cmd_buffer_name(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
@@ -425,14 +418,36 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const env = janet.janet_core_env(null);
 
     janet.janet_def(env, "stax-pid", janet.janet_wrap_cfunction(cmd_stax_pid), "Host PID.");
-    janet.janet_def(env, "stax-bash", janet.janet_wrap_cfunction(cmd_stax_bash), "Run a bash command; return exit status.");
+    janet.janet_def(env, "stax-bash", janet.janet_wrap_cfunction(sandbox.gated_stax_bash), "Run a bash command; return exit status. Requires `exec` capability.");
     janet.janet_def(env, "buffer-name", janet.janet_wrap_cfunction(cmd_buffer_name), "Current buffer name, or nil.");
     janet.janet_def(env, "buffer-size", janet.janet_wrap_cfunction(cmd_buffer_size), "Current buffer byte size.");
+
+    // Install capability-gated wrappers over Janet's stdlib dangerous
+    // bindings. The MECHANISM is default-deny at the binding boundary;
+    // see docs/SANDBOX_THREAT_MODEL.md for the threat model + invariants.
+    // (Audit log writes are deferred until SessionAudit is initialized
+    // below — applyDefaultDeny itself is side-effect-free w.r.t. the audit.)
+    const replaced_bindings = sandbox.applyDefaultDeny(env.?);
 
     // Session audit log
     var audit = try SessionAudit.init(allocator, @intCast(libc.getpid()));
     defer audit.deinit();
     g_audit = &audit;
+
+    try audit.write("sandbox-applied", .{ .replaced = replaced_bindings });
+
+    // HOST POLICY (v1): grant `exec` at startup because mast's own
+    // first-party verbs (`M-x stax-search`, `M-x stax-dashboard`,
+    // `M-x stax-hunger`) shell out via `stax-bash`, AND fall-through Janet
+    // expressions are evaluated in the same env. Without this grant the
+    // out-of-the-box experience breaks. The MECHANISM (binding-level
+    // gate + capability check) is independent of this policy choice; v2
+    // will scope grants per-script-load so a runtime-loaded module gets
+    // a fresh, default-deny capability set even though init.janet had
+    // exec. See SANDBOX_THREAT_MODEL.md §"v1 host policy" + §"What v1
+    // does NOT defend against".
+    sandbox.grant(.exec);
+    try audit.write("sandbox-grant", .{ .capability = "exec", .scope = "host-policy-v1" });
 
     // Open initial file as :file buffer if provided. Routes through the
     // global storage slot so runtime-created buffers (via M-x save-as) share
