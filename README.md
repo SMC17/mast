@@ -11,17 +11,25 @@
 
 This is Emacs's architectural lesson — *every operation that touches the buffer goes through a public scriptable surface* — applied to the appliance-layer era of multi-agent software.
 
-## Status: v0.1.0 (commit-zero, 2026-05-13)
+## Status: v1.1.0 — substrate stable, surface layers roadmap
 
-Foundation-first. Three gates are green on Linux x86_64 and Apple Silicon arm64:
+Foundation-first. The v1.x line stabilizes the load-bearing substrate
+gates; the visual / multi-buffer / agent layers stay explicitly in the
+roadmap, not in this release.
+
+Substrate (stable in v1.x, green on Linux x86_64 + Apple Silicon arm64):
 
 | Gate | Status |
 |---|---|
 | 1. Janet embeds cleanly in a Zig binary | ✓ |
 | 2. Buffer-as-protocol shape specified | ✓ |
 | 3. M-x command runner dispatches | ✓ |
+| 4. File-write buffer ops + atomic save (v1.1.0) | ✓ |
 
-What's NOT in v0.1: visual TUI, file-writing buffers, local-inference daemon, multi-buffer state, native Windows. See `CHANGELOG.md` for the full v0.1 scope.
+What's still on the roadmap (NOT in v1.1.0): visual TUI, local-inference
+daemon, multi-buffer state, native Windows. See `CHANGELOG.md` for the
+full per-tag scope. The v1.x API on the substrate gates above is locked —
+breaking changes wait for v2.0.
 
 ## Build
 
