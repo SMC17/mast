@@ -29,14 +29,14 @@ jobs:
 
       - name: Smoke — M-x dispatch round-trip
         run: |
-          OUTPUT=$(printf 'M-x pid\nM-x (+ 2 40)\nM-x exit\n' | ./zig-out/bin/mast)
+          OUTPUT=$(printf 'M-x pid\nM-x (+ 2 40)\nM-x exit\n' | ./zig-out/bin/mast 2>&1)
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -q "→ 42" || (echo "FAIL: Janet (+ 2 40) eval did not return 42"; exit 1)
           echo "$OUTPUT" | grep -q "(exiting)" || (echo "FAIL: exit verb did not fire"; exit 1)
 
       - name: Smoke — file buffer round-trip
         run: |
-          OUTPUT=$(printf 'M-x buffer-name\nM-x display\nM-x exit\n' | ./zig-out/bin/mast README.md)
+          OUTPUT=$(printf 'M-x buffer-name\nM-x display\nM-x exit\n' | ./zig-out/bin/mast README.md 2>&1)
           echo "$OUTPUT" | grep -q "README.md" || (echo "FAIL: buffer-name not rendered"; exit 1)
           echo "$OUTPUT" | grep -q "\[:file\]" || (echo "FAIL: display did not render :file kind"; exit 1)
 
@@ -60,5 +60,5 @@ jobs:
 
       - name: Smoke — M-x dispatch round-trip
         run: |
-          OUTPUT=$(printf 'M-x pid\nM-x (+ 2 40)\nM-x exit\n' | ./zig-out/bin/mast)
+          OUTPUT=$(printf 'M-x pid\nM-x (+ 2 40)\nM-x exit\n' | ./zig-out/bin/mast 2>&1)
           echo "$OUTPUT" | grep -q "→ 42" || (echo "FAIL: Janet eval"; exit 1)
