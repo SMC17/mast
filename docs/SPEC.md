@@ -62,7 +62,7 @@ Editor commands that invoke an agent route through `stax-spawn` (for new agents)
 
 The editor presents three default agent surfaces:
 
-- **Edit-this-buffer agent** — single-shot transformation of the current buffer. Routes to `claude` CLI by default with prompt + buffer as stdin.
+- **Edit-this-buffer agent** — single-shot transformation of the current buffer. Routes to the configured agent CLI with prompt + buffer as stdin.
 - **Lane agent** — long-running task in a tmux-wrapped tab. Routes to `stax-spawn` and inherits the new preflight discipline.
 - **Search agent** — read-only retrieval over the local corpus via `stax-search`. Returns a buffer of results, not a chat.
 
