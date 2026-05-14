@@ -285,6 +285,28 @@ test "capability set: grant / has / revokeAll behave correctly" {
     try std.testing.expect(caps.has(.fs_write));
 }
 
+test "eqAsciiCI handles every A-Z boundary (caught by mutation testing 2026-05-14)" {
+    // Mutation testing surfaced that ca >= 'A' -> ca > 'A' slipped through:
+    // none of the truthy/falsy keywords contain a capital 'A' as a letter
+    // that needs lowercasing, so the off-by-one at the bottom of the A-Z
+    // range was observationally invisible. This test pins the boundary
+    // by exercising every single A-Z letter as the leading character.
+    try std.testing.expect(eqAsciiCI("A", "a"));
+    try std.testing.expect(eqAsciiCI("B", "b"));
+    try std.testing.expect(eqAsciiCI("Z", "z"));
+    // And the boundary in the other direction (lowercase reaches uppercase):
+    try std.testing.expect(eqAsciiCI("a", "A"));
+    try std.testing.expect(eqAsciiCI("z", "Z"));
+    // And mixed-case sequences exercising every A-Z position:
+    try std.testing.expect(eqAsciiCI("AbCdEf", "aBcDeF"));
+    try std.testing.expect(eqAsciiCI("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"));
+    // Non-letters must NOT be munged:
+    try std.testing.expect(eqAsciiCI("@", "@")); // ASCII just before 'A'
+    try std.testing.expect(!eqAsciiCI("@", "`")); // ASCII just before 'a'; not equal
+    try std.testing.expect(eqAsciiCI("[", "[")); // ASCII just after 'Z'
+    try std.testing.expect(!eqAsciiCI("[", "{")); // ASCII just after 'z'; not equal
+}
+
 test "MAST_SANDBOX_STRICT env parsing: truthy / falsy / case-insensitive" {
     // Truthy values
     try std.testing.expect(strictModeFromEnv("1"));
