@@ -1,7 +1,9 @@
 # mast — Sandbox Threat Model & Capability Vocabulary
 
 Status: 2026-05-14. Proof level: **audited** (this document) + **unit-tested**
-(the one currently-gated binding, `os/shell`).
+(the one currently-gated binding, `os/shell` + `stax-bash`) +
+**posture-observable-end-to-end** in the production binary under
+`MAST_SANDBOX_STRICT=1` (see §5 `MAST_SANDBOX_STRICT`).
 
 This document IS the audit. The persona is the assistant working as a senior
 systems / security engineer; no external review claimed. Self-applied,
@@ -200,8 +202,8 @@ linked in.
 
 ### v1 host policy
 
-The mast binary grants `Capability.exec` unconditionally at startup
-because mast's own first-party verbs (`M-x stax-search`,
+By default the mast binary grants `Capability.exec` unconditionally at
+startup because mast's own first-party verbs (`M-x stax-search`,
 `M-x stax-dashboard`, `M-x stax-hunger`) shell out via `stax-bash`,
 AND fall-through Janet expressions in the REPL share the same env.
 Without this grant the out-of-the-box experience breaks.
@@ -211,6 +213,42 @@ is the binding-level gate, proven by the unit tests against a fresh,
 no-grant env. v2 will scope grants per-script-load so a runtime-loaded
 module gets a fresh, default-deny capability set even though init.janet
 (loaded under host policy) has the `exec` cap.
+
+### `MAST_SANDBOX_STRICT` — production-binary observation of default-deny
+
+Setting the env var `MAST_SANDBOX_STRICT` to a truthy value
+(`1` / `true` / `yes` / `on`, case-insensitive) suppresses the v1
+auto-grant of `exec`. The production binary then runs with the same
+default-deny posture the sandbox unit tests prove on a fresh VM:
+
+```
+$ MAST_SANDBOX_STRICT=1 ./zig-out/bin/mast
+mast: MAST_SANDBOX_STRICT enabled — `exec` capability NOT auto-granted. ...
+M-x x (os/shell "true")
+  → error: mast.sandbox: os/shell denied — capability `exec` not granted (default-deny)
+```
+
+What this moves: the claim "deny-by-default works" was previously
+load-bearing on the sandbox.zig unit tests against a fresh VM. With
+`MAST_SANDBOX_STRICT` available, the same claim is now observable
+end-to-end against the shipped binary, exercised by
+`tests/strict_mode_integration.sh` via `zig build test`. This is a
+posture upgrade from **mechanism-proven (unit tests)** to
+**posture-observable-end-to-end (production binary)**.
+
+What this does NOT move: every residual gap listed in §6 below remains
+present under strict mode. `os/execute`, `os/spawn`, `posix-fork`,
+`posix-exec`, `file/*`, `net/*`, `native`, `unmarshal`, `os/exit` are
+not gated AT ALL in v1 — a strict-mode session can still invoke any of
+them. Strict mode demonstrates the gate that exists; it does not
+retroactively gate the residual surface.
+
+Parser semantics (`src/sandbox.zig::strictModeFromEnv`):
+
+- Truthy (case-insensitive exact match): `1`, `true`, `yes`, `on`
+- Falsy: empty string, `0`, `false`, `no`, `off`, anything else,
+  trailing/leading whitespace included
+- Unset env var: falsy (handled upstream in `main.zig::read_strict_env`)
 
 ---
 
@@ -344,5 +382,7 @@ this document does NOT make the stronger claim.
   (`os/`), 18421 (`file/`), 21893 (`net/`), 12481 (`ev/`).
 - mast capability code: `src/sandbox.zig`.
 - mast wiring: `src/main.zig` between `janet_core_env` and the REPL.
+- Strict-mode integration test: `tests/strict_mode_integration.sh`
+  (5 cases, wired into `zig build test`).
 - Janet's own `janet_def` shape (env entry = `{:value <cfunction> ...}`):
   `vendored/janet/janet.c` line 34162.

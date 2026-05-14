@@ -100,4 +100,21 @@ pub fn build(b: *std.Build) void {
     const sandbox_tests = b.addTest(.{ .root_module = sandbox_test_mod });
     const run_sandbox_tests = b.addRunArtifact(sandbox_tests);
     test_step.dependOn(&run_sandbox_tests.step);
+
+    // Integration test: spawns the actual installed `mast` binary with
+    // MAST_SANDBOX_STRICT=1 and asserts the deny path is observable on
+    // stderr. Implemented as a bash script (tests/strict_mode_integration.sh)
+    // to insulate the test from Zig 0.16's std.process / std.Io churn —
+    // the contract being tested is "the binary, when run with an env var,
+    // emits a specific diagnostic to stderr", which is exactly what shell
+    // pipelines + grep are good at. The script is invoked through
+    // b.addSystemCommand and gated on the install step so the binary
+    // exists before the test runs.
+    const integration_smoke = b.addSystemCommand(&.{
+        "bash",
+        "tests/strict_mode_integration.sh",
+    });
+    integration_smoke.setEnvironmentVariable("MAST_BIN", b.getInstallPath(.bin, "mast"));
+    integration_smoke.step.dependOn(b.getInstallStep());
+    test_step.dependOn(&integration_smoke.step);
 }

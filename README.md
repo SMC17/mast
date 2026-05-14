@@ -95,6 +95,40 @@ M-x (buffer-info)
 
 The eval happens before the REPL starts and any error is non-fatal — mast still drops you into the prompt and the audit log records the failure.
 
+## Security / Sandbox
+
+mast embeds a Janet VM and evaluates user-supplied forms in-process. The
+v1 sandbox is a **first slice of a capability model**, not OS isolation —
+see `docs/SANDBOX_THREAT_MODEL.md` for the full posture, asset inventory,
+and explicit residual gaps. Today only `exec`-class bindings (`os/shell`
+and the host-bound `stax-bash`) are gated; `os/execute`, `os/spawn`,
+`file/*`, `net/*`, `native`, `unmarshal`, `os/exit` remain ungated and
+are tracked as v2 work.
+
+### `MAST_SANDBOX_STRICT`
+
+Set `MAST_SANDBOX_STRICT=1` (also accepts `true`/`yes`/`on`,
+case-insensitive) to suppress the v1 host-policy auto-grant of `exec`.
+The production binary then runs in the same default-deny posture the
+sandbox unit tests prove on a fresh VM: any verb that shells out
+(`M-x stax-search`, `M-x stax-dashboard`, `M-x stax-hunger`,
+`(os/shell ...)`, `(stax-bash ...)`) fails loudly with
+`denied capability: exec`.
+
+```sh
+MAST_SANDBOX_STRICT=1 ./zig-out/bin/mast
+M-x stax-dashboard
+  → error: mast.sandbox: stax-bash denied — capability `exec` not granted (default-deny)
+```
+
+What strict mode buys you: the deny-by-default claim is now observable
+end-to-end against the shipped binary, not just the test rig. What it
+does NOT buy you: defense against any of the `exec`-adjacent residual
+gaps (`os/execute`, `os/spawn`, `posix-fork`, `posix-exec`) — those are
+not gated at all in v1 and remain reachable under strict mode.
+`MAST_SANDBOX_STRICT=0` / unset / `false` / `no` / `off` leaves the
+default policy in place.
+
 ## Why "mast"
 
 A mast is the load-bearing spar everything hangs off — sails, rigging, cargo nets, flags. In the substrate metaphor it is the single primitive everything composes through: a buffer hangs off the protocol, an agent hangs off a buffer, an audit event hangs off an agent. The name is Lineage-compatible — the merchant marine is a recurring anchor in the [Lineage series](https://github.com/SMC17/stax-blog) of biographical merchant studies — without coining a new "sovereign-X" term.
