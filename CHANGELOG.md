@@ -1,4 +1,32 @@
-## v1.0.0 — 2026-05-13
+# Changelog
+
+All notable changes to `mast` will be documented here.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+versions follow [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+## [1.1.0] — 2026-05-13
+
+First substantive feature release post-hygiene-v1.0.
+
+### Added
+
+- **File-write buffers.** `:file` buffers now support `save` and `save-as`. Writes are atomic: data goes to `<path>.tmp.<pid>`, `fsync` is invoked on the temp fd, then `rename(2)` swaps it into place — a crash mid-write cannot truncate the original file.
+- **`Buffer.append(bytes)`** + **`Buffer.setContents(bytes)`**: mutating-buffer primitives. Both mark the buffer `dirty` for the save-state contract.
+- **`Buffer.saveAs(path)`**: converts any buffer kind (`:agent`, `:search`, `:manifest`) into a `:file` rooted at the new path. The buffer's `name` and `kind` reassign on success.
+- New built-in `M-x` verbs: `append <text…>`, `save`, `save-as <path>`. If `save-as` is invoked with no buffer open, mast creates an empty `:file` buffer at the path first (same semantics as `vim newfile.txt`).
+- Dirty indicator (`*`) in the `M-x display` status header so users can see whether their buffer has unwritten changes.
+- Audit-log events for every mutation: `buffer-create`, `buffer-append`, `buffer-save`, `buffer-saveas`, plus matching `mx-*-error` rows.
+- **`zig build test`** step: 4 unit tests for the buffer protocol (round-trip, append+dirty, atomic save, saveAs kind-conversion). Wired into CI on both Linux x86_64 and Apple Silicon arm64.
+- CI: new save-round-trip smoke (`save-as` → `append` → `save` → on-disk byte-match) on both platforms.
+
+### Changed
+
+- v1.x cycle continues per the Virgil convention: surface stable. The new `save` / `save-as` / `append` verbs are additive; no existing verb's semantics change.
+- `main.zig` buffer storage moved from a function-local `var` to a module-level slot (`g_initial_buffer_storage`) so REPL-side commands like `save-as` can install a new buffer at runtime. v2.0 will replace this with a multi-buffer ring.
+
+## [1.0.0] — 2026-05-13
 
 **Production-grade hygiene milestone.**
 
@@ -8,14 +36,6 @@
 - CODEOWNERS routes review to @SMC17.
 - LICENSE, README, CONTRIBUTING, CI workflow verified.
 - v1.x cycle: surface stable; breaking changes bump to v2.x.
-
-# Changelog
-
-All notable changes to `mast` will be documented here.
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
-versions follow [Semantic Versioning](https://semver.org/).
-
-## [Unreleased]
 
 ## [0.1.1] — 2026-05-13
 

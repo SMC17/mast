@@ -40,6 +40,21 @@ jobs:
           echo "$OUTPUT" | grep -q "README.md" || (echo "FAIL: buffer-name not rendered"; exit 1)
           echo "$OUTPUT" | grep -q "\[:file\]" || (echo "FAIL: display did not render :file kind"; exit 1)
 
+      - name: Unit tests (buffer protocol)
+        run: zig build test --summary all
+
+      - name: Smoke — file-write round-trip (save-as + append + save)
+        run: |
+          TMP=$(mktemp /tmp/mast-ci-write.XXXXXX)
+          rm -f "$TMP"
+          OUTPUT=$(printf 'M-x save-as %s\nM-x append hello from ci\nM-x append second line\nM-x save\nM-x exit\n' "$TMP" | ./zig-out/bin/mast 2>&1)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "wrote .* bytes to $TMP" || (echo "FAIL: save did not report bytes written"; exit 1)
+          [ -f "$TMP" ] || (echo "FAIL: $TMP not created"; exit 1)
+          grep -q "^hello from ci$" "$TMP" || (echo "FAIL: first appended line not in saved file"; exit 1)
+          grep -q "^second line$" "$TMP" || (echo "FAIL: second appended line not in saved file"; exit 1)
+          rm -f "$TMP"
+
   build-macos:
     runs-on: macos-14
     steps:
@@ -62,3 +77,15 @@ jobs:
         run: |
           OUTPUT=$(printf 'M-x pid\nM-x (+ 2 40)\nM-x exit\n' | ./zig-out/bin/mast 2>&1)
           echo "$OUTPUT" | grep -q "→ 42" || (echo "FAIL: Janet eval"; exit 1)
+
+      - name: Unit tests (buffer protocol)
+        run: zig build test --summary all
+
+      - name: Smoke — file-write round-trip
+        run: |
+          TMP=$(mktemp /tmp/mast-ci-write.XXXXXX)
+          rm -f "$TMP"
+          OUTPUT=$(printf 'M-x save-as %s\nM-x append hello from mac ci\nM-x save\nM-x exit\n' "$TMP" | ./zig-out/bin/mast 2>&1)
+          echo "$OUTPUT" | grep -q "wrote .* bytes to $TMP" || (echo "FAIL: save not reported"; exit 1)
+          grep -q "^hello from mac ci$" "$TMP" || (echo "FAIL: appended line not in file"; exit 1)
+          rm -f "$TMP"

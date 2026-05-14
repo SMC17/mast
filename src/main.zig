@@ -1,13 +1,16 @@
-// mast — single-binary editor kernel. v0.1.0 commit-zero.
+// mast — single-binary editor kernel.
 //
 // Architecture: buffer-as-protocol + Janet-extensible M-x runner + session
 // audit log. See README.md and docs/SPEC.md.
 //
-// v0.1 scope:
+// Current scope:
 //   - Open a file as a `:file` buffer (positional arg)
 //   - Interactive M-x dispatcher with positional args ($1, $2, ...)
-//   - Built-in commands: pid, help, display, stax-search, stax-dashboard, stax-hunger
+//   - Built-in commands: pid, help, display, buffer-name, buffer-size,
+//     append, save, save-as, stax-search, stax-dashboard, stax-hunger
+//   - Atomic write-back via `M-x save` / `M-x save-as` (rename-after-fsync)
 //   - Unrecognised verbs fall through to raw Janet eval
+//   - $XDG_CONFIG_HOME/mast/init.janet loaded on startup
 //   - Every session writes an append-only audit log
 //
 // Build:  zig build -Doptimize=ReleaseSmall
@@ -39,6 +42,11 @@ const print = std.debug.print;
 
 var g_current_buffer: ?*Buffer = null;
 var g_audit: ?*SessionAudit = null;
+// Storage slot for buffers created at runtime by `M-x save-as` or future
+// `M-x new-buffer`. The slot is undefined until the first buffer is created;
+// g_current_buffer points to it when initialized. v0.2 multi-buffer will
+// replace this with a Buffer ring.
+var g_initial_buffer_storage: Buffer = undefined;
 
 // ─── Janet C-functions ──────────────────────────────────────────────────
 
@@ -92,6 +100,9 @@ const BUILTINS = [_]BuiltinCmd{
     .{ .name = "display", .janet_expr = "MAST_DISPLAY_SENTINEL", .description = "Render the current buffer" },
     .{ .name = "buffer-name", .janet_expr = "(buffer-name)", .description = "Name of current buffer" },
     .{ .name = "buffer-size", .janet_expr = "(buffer-size)", .description = "Byte size of current buffer" },
+    .{ .name = "append", .janet_expr = "MAST_APPEND_SENTINEL", .description = "Append text to the current buffer (marks dirty)" },
+    .{ .name = "save", .janet_expr = "MAST_SAVE_SENTINEL", .description = "Save the current :file buffer atomically" },
+    .{ .name = "save-as", .janet_expr = "MAST_SAVEAS_SENTINEL", .description = "Save buffer to a new path (becomes :file)" },
     .{ .name = "stax-search", .janet_expr = "(stax-bash (string \"stax-search \" $1))", .description = "Run stax-search Q" },
     .{ .name = "stax-dashboard", .janet_expr = "(stax-bash \"stax-dashboard --top 8\")", .description = "Show fleet dashboard" },
     .{ .name = "stax-hunger", .janet_expr = "(stax-bash \"stax-hunger --human\")", .description = "Show lane lifecycle classification" },
@@ -104,6 +115,9 @@ const HELP_TEXT =
     \\  M-x display             Render the current buffer
     \\  M-x buffer-name         Name of the current buffer
     \\  M-x buffer-size         Byte size of the current buffer
+    \\  M-x append <text…>      Append <text> + newline to current buffer
+    \\  M-x save                Atomically save current :file buffer
+    \\  M-x save-as <path>      Save buffer to <path>; buffer becomes :file
     \\  M-x stax-search Q       Run stax-search Q (delegates to local CLI)
     \\  M-x stax-dashboard      Show stax fleet dashboard
     \\  M-x stax-hunger         Show per-lane lifecycle classification
@@ -170,7 +184,7 @@ fn parse_mx_line(allocator: Allocator, line: []const u8) !?ParsedMx {
 fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) !void {
     var line_buf: [4096]u8 = undefined;
 
-    print("mast v0.1.1 — single-binary editor kernel\n", .{});
+    print("mast v1.1.0 — single-binary editor kernel\n", .{});
     print("Type 'M-x help' or just 'help'. Ctrl-D to quit.\n\n", .{});
 
     var leftover_buf: [4096]u8 = undefined;
@@ -239,8 +253,12 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
                     // proper TUI surface.
                     var line_no: usize = 0;
                     var line_start: usize = 0;
-                    print("── [:{s}] {s} — {d} lines, {d} bytes ──\n", .{
-                        @tagName(buf.kind), buf.name, buf.lineCount(), buf.contents.len,
+                    print("── [:{s}] {s}{s} — {d} lines, {d} bytes ──\n", .{
+                        @tagName(buf.kind),
+                        buf.name,
+                        if (buf.dirty) " *" else "",
+                        buf.lineCount(),
+                        buf.contents.len,
                     });
                     var i: usize = 0;
                     const MAX_LINES: usize = 50;
@@ -261,6 +279,74 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
                     print("\n", .{});
                 } else {
                     print("  (no buffer open)\n\n", .{});
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, b.janet_expr, "MAST_APPEND_SENTINEL")) {
+                if (g_current_buffer) |buf| {
+                    // Reassemble all positional args back into a single string
+                    // separated by single spaces. The parser already split on
+                    // whitespace; we want "M-x append hello world" to append
+                    // "hello world\n" not append two separate lines.
+                    var combined: std.ArrayList(u8) = .empty;
+                    defer combined.deinit(allocator);
+                    for (parsed.args, 0..) |arg, i_arg| {
+                        if (i_arg > 0) try combined.append(allocator, ' ');
+                        try combined.appendSlice(allocator, arg);
+                    }
+                    try combined.append(allocator, '\n');
+                    buf.append(combined.items) catch |e| {
+                        print("  (append error: {})\n\n", .{e});
+                        try audit.write("mx-append-error", .{ .err = @errorName(e) });
+                        continue;
+                    };
+                    print("  → appended {d} bytes; buffer now {d} bytes, dirty\n\n",
+                          .{ combined.items.len, buf.contents.len });
+                    try audit.write("buffer-append", .{ .bytes = combined.items.len });
+                } else {
+                    print("  (no buffer open — try `mast <file>` or `M-x save-as <path>`)\n\n", .{});
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, b.janet_expr, "MAST_SAVE_SENTINEL")) {
+                if (g_current_buffer) |buf| {
+                    const n = buf.save() catch |e| {
+                        print("  (save error: {})\n\n", .{e});
+                        try audit.write("mx-save-error", .{ .err = @errorName(e), .path = buf.name });
+                        continue;
+                    };
+                    print("  → wrote {d} bytes to {s}\n\n", .{ n, buf.name });
+                    try audit.write("buffer-save", .{ .path = buf.name, .bytes = n });
+                } else {
+                    print("  (no buffer open)\n\n", .{});
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, b.janet_expr, "MAST_SAVEAS_SENTINEL")) {
+                if (parsed.args.len == 0) {
+                    print("  (usage: M-x save-as <path>)\n\n", .{});
+                    continue;
+                }
+                // If no buffer is open, create an empty :file buffer at the
+                // target path (same semantics as `vim some-new-file.txt`).
+                if (g_current_buffer == null) {
+                    const new_buf = Buffer.fromBytes(allocator, .file, parsed.args[0], "") catch |e| {
+                        print("  (could not create buffer: {})\n\n", .{e});
+                        continue;
+                    };
+                    g_initial_buffer_storage = new_buf;
+                    g_current_buffer = &g_initial_buffer_storage;
+                    try audit.write("buffer-create", .{ .path = parsed.args[0], .kind = "file" });
+                }
+                if (g_current_buffer) |buf| {
+                    const n = buf.saveAs(parsed.args[0]) catch |e| {
+                        print("  (save-as error: {})\n\n", .{e});
+                        try audit.write("mx-saveas-error", .{ .err = @errorName(e), .path = parsed.args[0] });
+                        continue;
+                    };
+                    print("  → wrote {d} bytes to {s} (buffer is now :file)\n\n",
+                          .{ n, parsed.args[0] });
+                    try audit.write("buffer-saveas", .{ .path = parsed.args[0], .bytes = n });
                 }
                 continue;
             }
@@ -323,7 +409,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return;
         }
         if (std.mem.eql(u8, a, "--version")) {
-            print("mast v0.1.1\n", .{});
+            print("mast v1.1.0\n", .{});
             return;
         }
         initial_file = try allocator.dupe(u8, a);
@@ -348,14 +434,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer audit.deinit();
     g_audit = &audit;
 
-    // Open initial file as :file buffer if provided
-    var buffer_storage: Buffer = undefined;
+    // Open initial file as :file buffer if provided. Routes through the
+    // global storage slot so runtime-created buffers (via M-x save-as) share
+    // the same ownership model.
     if (initial_file) |path| {
-        buffer_storage = Buffer.fromFile(allocator, path) catch |e| {
+        g_initial_buffer_storage = Buffer.fromFile(allocator, path) catch |e| {
             print("could not open {s}: {}\n", .{ path, e });
             std.process.exit(2);
         };
-        g_current_buffer = &buffer_storage;
+        g_current_buffer = &g_initial_buffer_storage;
         try audit.write("buffer-open", .{ .path = path, .kind = "file" });
     }
     defer if (g_current_buffer) |b| b.deinit();
