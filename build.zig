@@ -51,4 +51,26 @@ pub fn build(b: *std.Build) void {
     // `zig build smoke` — non-interactive smoke test using a heredoc-piped script
     const smoke_step = b.step("smoke", "Run a non-interactive smoke test");
     smoke_step.dependOn(&run_cmd.step);
+
+    // `zig build test` — unit tests for the buffer protocol.
+    // Tests need libc for the open/read/write/rename/unlink syscalls used by
+    // Buffer.save/saveAs, so the test module mirrors the main exe's link
+    // config.
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/buffer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_mod.link_libc = true;
+    test_mod.linkSystemLibrary("m", .{});
+    if (t.os.tag == .linux) {
+        test_mod.linkSystemLibrary("pthread", .{});
+        test_mod.linkSystemLibrary("dl", .{});
+        test_mod.linkSystemLibrary("rt", .{});
+    }
+
+    const buffer_tests = b.addTest(.{ .root_module = test_mod });
+    const run_buffer_tests = b.addRunArtifact(buffer_tests);
+    const test_step = b.step("test", "Run unit tests (buffer protocol)");
+    test_step.dependOn(&run_buffer_tests.step);
 }

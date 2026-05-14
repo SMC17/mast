@@ -46,10 +46,17 @@ The amalgamated Janet source (3.3 MB) is vendored at `vendored/janet/janet.c`; t
 # At the M-x prompt:
 M-x help                       # built-in command list
 M-x pid                        # show host PID
-M-x stax-search "query here"   # delegates to stax-search if installed
 M-x display                    # render current buffer
+M-x append some new content    # append text + newline; marks buffer dirty
+M-x save                       # atomic write-back (tmp + fsync + rename)
+M-x save-as /tmp/new.md        # save to a new path; buffer becomes :file
+M-x stax-search "query here"   # delegates to stax-search if installed
 M-x exit
 ```
+
+### Atomic save
+
+`M-x save` writes to a temporary file in the same directory (`<path>.tmp.<pid>`), `fsync`s it, then `rename(2)`s it into place. A crash mid-write cannot truncate the original file — the rename is atomic on a single filesystem, and the fsync makes the post-rename content durable.
 
 Unrecognised verbs are evaluated as raw Janet:
 
