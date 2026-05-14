@@ -25,6 +25,7 @@ const libc = @cImport({
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
     @cInclude("stdio.h");
+    @cInclude("fcntl.h");
 });
 
 const Allocator = std.mem.Allocator;
@@ -169,7 +170,7 @@ fn parse_mx_line(allocator: Allocator, line: []const u8) !?ParsedMx {
 fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) !void {
     var line_buf: [4096]u8 = undefined;
 
-    print("mast v0.1.0 — single-binary editor kernel\n", .{});
+    print("mast v0.1.1 — single-binary editor kernel\n", .{});
     print("Type 'M-x help' or just 'help'. Ctrl-D to quit.\n\n", .{});
 
     var leftover_buf: [4096]u8 = undefined;
@@ -322,7 +323,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return;
         }
         if (std.mem.eql(u8, a, "--version")) {
-            print("mast v0.1.0\n", .{});
+            print("mast v0.1.1\n", .{});
             return;
         }
         initial_file = try allocator.dupe(u8, a);
@@ -359,5 +360,59 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     defer if (g_current_buffer) |b| b.deinit();
 
+    // Load $XDG_CONFIG_HOME/mast/init.janet (default ~/.config/mast/init.janet)
+    // before entering the REPL so user-defined commands are available at the
+    // first M-x prompt. Per SPEC.md §6 v0.1 deliverable #5.
+    load_init_janet(allocator, env.?, &audit) catch |e| {
+        // Non-fatal: missing init.janet is normal, parse errors are surfaced
+        // by Janet itself.
+        switch (e) {
+            error.InitFileMissing => {},
+            else => print("init.janet load: {}\n", .{e}),
+        }
+    };
+
     try run_repl(allocator, env.?, &audit);
+}
+
+fn load_init_janet(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) !void {
+    // Resolve config path: $XDG_CONFIG_HOME/mast/init.janet or ~/.config/mast/init.janet
+    const env_config = libc.getenv("XDG_CONFIG_HOME");
+    const env_home = libc.getenv("HOME");
+    var path_buf: [512]u8 = undefined;
+    const path = if (env_config != null) blk: {
+        const s = std.mem.span(@as([*:0]const u8, @ptrCast(env_config.?)));
+        break :blk try std.fmt.bufPrint(&path_buf, "{s}/mast/init.janet", .{s});
+    } else blk: {
+        const h = if (env_home != null)
+            std.mem.span(@as([*:0]const u8, @ptrCast(env_home.?)))
+        else
+            return error.InitFileMissing;
+        break :blk try std.fmt.bufPrint(&path_buf, "{s}/.config/mast/init.janet", .{h});
+    };
+
+    // Attempt to read the file via libc (consistent with the rest of the
+    // codebase, which avoids std.fs/std.Io churn across Zig 0.13–0.16).
+    const c_path = try allocator.dupeZ(u8, path);
+    defer allocator.free(c_path);
+    const fd = libc.open(@ptrCast(c_path.ptr), libc.O_RDONLY);
+    if (fd < 0) return error.InitFileMissing;
+    defer _ = libc.close(fd);
+
+    var contents = try allocator.alloc(u8, 65536); // 64 KB cap on init.janet
+    defer allocator.free(contents);
+    const rc = libc.read(fd, contents.ptr, contents.len - 1);
+    if (rc <= 0) return error.InitFileEmpty;
+    const len: usize = @intCast(rc);
+    contents[len] = 0;
+
+    var out: janet.Janet = undefined;
+    const status = janet.janet_dostring(env, @ptrCast(contents.ptr), "init.janet", &out);
+    if (status != 0) {
+        print("init.janet: eval error (status={d})\n", .{status});
+        try audit.write("init-janet-error", .{ .path = path, .status = status });
+        return error.InitFileEvalFailed;
+    }
+    print("init.janet loaded from {s}\n", .{path});
+    try audit.write("init-janet-loaded", .{ .path = path, .bytes = len });
 }
