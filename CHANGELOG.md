@@ -6,6 +6,10 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **First slice of a capability model** (`src/sandbox.zig`, `docs/SANDBOX_THREAT_MODEL.md`): default-deny posture documented and worked end-to-end on one Janet stdlib binding — `os/shell` — plus the host-bound `stax-bash`. `os/execute`, `os/spawn`, `file/*`, `net/*`, `native`, `unmarshal`, and `os/exit` remain ungated; the threat-model doc lists every residual gap. Not a sandbox in the OS-isolation sense. Two unit tests cover deny + grant on `os/shell`.
+
 ## [1.1.0] — 2026-05-13
 
 First substantive feature release post-hygiene-v1.0.
