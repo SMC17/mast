@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Zig 0.16.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build (ReleaseSmall)
+        run: zig build -Doptimize=ReleaseSmall
+
+      - name: Binary size + sanity
+        run: |
+          ls -la zig-out/bin/mast
+          ./zig-out/bin/mast --version
+          ./zig-out/bin/mast --help
+
+      - name: Smoke — M-x dispatch round-trip
+        run: |
+          OUTPUT=$(printf 'M-x pid\nM-x (+ 2 40)\nM-x exit\n' | ./zig-out/bin/mast)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "→ 42" || (echo "FAIL: Janet (+ 2 40) eval did not return 42"; exit 1)
+          echo "$OUTPUT" | grep -q "(exiting)" || (echo "FAIL: exit verb did not fire"; exit 1)
+
+      - name: Smoke — file buffer round-trip
+        run: |
+          OUTPUT=$(printf 'M-x buffer-name\nM-x display\nM-x exit\n' | ./zig-out/bin/mast README.md)
+          echo "$OUTPUT" | grep -q "README.md" || (echo "FAIL: buffer-name not rendered"; exit 1)
+          echo "$OUTPUT" | grep -q "\[:file\]" || (echo "FAIL: display did not render :file kind"; exit 1)
+
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Zig 0.16.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build (ReleaseSmall, arm64)
+        run: zig build -Doptimize=ReleaseSmall
+
+      - name: Binary sanity (Mach-O arm64)
+        run: |
+          file zig-out/bin/mast
+          ./zig-out/bin/mast --version
+
+      - name: Smoke — M-x dispatch round-trip
+        run: |
+          OUTPUT=$(printf 'M-x pid\nM-x (+ 2 40)\nM-x exit\n' | ./zig-out/bin/mast)
+          echo "$OUTPUT" | grep -q "→ 42" || (echo "FAIL: Janet eval"; exit 1)
