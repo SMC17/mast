@@ -1,5 +1,10 @@
 # mast
 
+[![CI](https://github.com/SMC17/mast/actions/workflows/ci.yml/badge.svg)](https://github.com/SMC17/mast/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/SMC17/mast?include_prereleases&sort=semver)](https://github.com/SMC17/mast/releases)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
+[![Zig](https://img.shields.io/badge/Zig-0.16-orange.svg)](https://ziglang.org/)
+
 > Single-binary editor kernel. Buffer-as-protocol. Janet-extensible. AGPL.
 
 `mast` is the load-bearing spar everything else hangs off — buffers, agents, search, audit. It is not "an editor with features." It is a substrate that ships with editing as one application. Compiler integration, debugger, file manager, agent orchestration, knowledge-graph queries, and audit-register operations are all first-class applications of the substrate, written against the same primitives.
