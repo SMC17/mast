@@ -1,3 +1,14 @@
+## v1.0.0 — 2026-05-13
+
+**Production-grade hygiene milestone.**
+
+- SECURITY.md present (coordinated disclosure policy).
+- CODE_OF_CONDUCT.md (Contributor Covenant 2.1).
+- Dependabot configured for github-actions security updates (monthly).
+- CODEOWNERS routes review to @SMC17.
+- LICENSE, README, CONTRIBUTING, CI workflow verified.
+- v1.x cycle: surface stable; breaking changes bump to v2.x.
+
 # Changelog
 
 All notable changes to `mast` will be documented here.
