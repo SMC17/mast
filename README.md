@@ -105,7 +105,7 @@ See `docs/SPEC.md` for the full architectural sketch and `docs/STRATEGIC_POSITIO
 
 - **Buffer-as-protocol.** Every observable object exposes `read`, `write`, `subscribe`, `mark`, `mode`, `properties`. There is no second access path.
 - **Extensibility through Janet.** Janet was chosen because it embeds cleanly in a single Zig binary, supports interactive REPL evaluation against the live editor process, and exposes the buffer surface as a first-class scripting target. See `docs/EXTENSIBILITY_LANGUAGE.md` for the decision memo.
-- **Agent integration through CLIs, not network sockets.** Editor commands that invoke an agent route through locally-installed CLIs (`stax-spawn`, `stax-search`, `claude`, etc.) — never directly to a frontier API. This is an architectural commitment, not a configuration option.
+- **Agent integration through CLIs, not network sockets.** Editor commands that invoke an agent route through locally-installed CLIs (`stax-spawn`, `stax-search`, etc.) — never directly to a frontier API. This is an architectural commitment, not a configuration option.
 - **Append-only audit log.** Every editor session writes to `~/.local/state/stax/editor-sessions/<session-id>.jsonl`. The substrate cannot lie to its future self about what it did.
 
 ## License
