@@ -71,6 +71,33 @@ pub fn build(b: *std.Build) void {
 
     const buffer_tests = b.addTest(.{ .root_module = test_mod });
     const run_buffer_tests = b.addRunArtifact(buffer_tests);
-    const test_step = b.step("test", "Run unit tests (buffer protocol)");
+    const test_step = b.step("test", "Run unit tests (buffer protocol + sandbox)");
     test_step.dependOn(&run_buffer_tests.step);
+
+    // Sandbox tests — need the full Janet runtime linked in so the
+    // gated wrappers can actually stand up a VM.
+    const sandbox_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/sandbox.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sandbox_test_mod.addCSourceFile(.{
+        .file = b.path("vendored/janet/janet.c"),
+        .flags = &.{
+            "-std=c99",
+            "-fno-strict-aliasing",
+            "-Wno-unused-parameter",
+        },
+    });
+    sandbox_test_mod.addIncludePath(b.path("vendored/janet"));
+    sandbox_test_mod.link_libc = true;
+    sandbox_test_mod.linkSystemLibrary("m", .{});
+    if (t.os.tag == .linux) {
+        sandbox_test_mod.linkSystemLibrary("pthread", .{});
+        sandbox_test_mod.linkSystemLibrary("dl", .{});
+        sandbox_test_mod.linkSystemLibrary("rt", .{});
+    }
+    const sandbox_tests = b.addTest(.{ .root_module = sandbox_test_mod });
+    const run_sandbox_tests = b.addRunArtifact(sandbox_tests);
+    test_step.dependOn(&run_sandbox_tests.step);
 }
