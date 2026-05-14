@@ -58,6 +58,28 @@ M-x (+ 1 2)
   → 3
 ```
 
+## Extending — `init.janet`
+
+On startup, mast reads `$XDG_CONFIG_HOME/mast/init.janet` (default `~/.config/mast/init.janet`) and evaluates it in the live Janet env. Anything you define there is available at the first `M-x` prompt. A starter file is in `examples/init.janet`:
+
+```janet
+(def hello       (fn [name] (string "hello, " name)))
+(def buffer-info (fn []     (if (buffer-name)
+                              (string "buffer: " (buffer-name) ", " (buffer-size) " bytes")
+                              "no buffer open")))
+```
+
+Then at the prompt:
+
+```
+M-x (hello "world")
+  → hello, world
+M-x (buffer-info)
+  → no buffer open
+```
+
+The eval happens before the REPL starts and any error is non-fatal — mast still drops you into the prompt and the audit log records the failure.
+
 ## Why "mast"
 
 A mast is the load-bearing spar everything hangs off — sails, rigging, cargo nets, flags. In the substrate metaphor it is the single primitive everything composes through: a buffer hangs off the protocol, an agent hangs off a buffer, an audit event hangs off an agent. The name is Lineage-compatible — the merchant marine is a recurring anchor in the [Lineage series](https://github.com/SMC17/stax-blog) of biographical merchant studies — without coining a new "sovereign-X" term.
