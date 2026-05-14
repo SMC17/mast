@@ -194,6 +194,40 @@ pub fn revokeAll() void {
     g_sandbox = .{ .bits = 0 };
 }
 
+// ─── Strict-mode env-var parsing ────────────────────────────────────────
+//
+// `MAST_SANDBOX_STRICT` suppresses the host's v1 auto-grant of `exec` so
+// the production binary exhibits the same default-deny posture proved by
+// the unit tests on a fresh VM. The parser accepts case-insensitive
+// "1" / "true" / "yes" / "on" as truthy; everything else (including the
+// empty string, "0", "false", "no", "off", garbage) is falsy. Unset is
+// also falsy — main.zig handles `getenv == null` upstream of this call.
+//
+// Living in sandbox.zig (rather than main.zig) so the unit test target
+// can reach it without dragging the main binary into a test module.
+
+pub fn strictModeFromEnv(val: []const u8) bool {
+    if (val.len == 0) return false;
+    if (eqAsciiCI(val, "1")) return true;
+    if (eqAsciiCI(val, "true")) return true;
+    if (eqAsciiCI(val, "yes")) return true;
+    if (eqAsciiCI(val, "on")) return true;
+    return false;
+}
+
+fn eqAsciiCI(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var i: usize = 0;
+    while (i < a.len) : (i += 1) {
+        const ca = a[i];
+        const cb = b[i];
+        const la = if (ca >= 'A' and ca <= 'Z') ca + 32 else ca;
+        const lb = if (cb >= 'A' and cb <= 'Z') cb + 32 else cb;
+        if (la != lb) return false;
+    }
+    return true;
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────
 //
 // These tests stand up a real Janet VM, install the gated wrappers,
@@ -249,4 +283,30 @@ test "capability set: grant / has / revokeAll behave correctly" {
     caps.grant(.fs_write);
     try std.testing.expect(caps.has(.exec));
     try std.testing.expect(caps.has(.fs_write));
+}
+
+test "MAST_SANDBOX_STRICT env parsing: truthy / falsy / case-insensitive" {
+    // Truthy values
+    try std.testing.expect(strictModeFromEnv("1"));
+    try std.testing.expect(strictModeFromEnv("true"));
+    try std.testing.expect(strictModeFromEnv("TRUE"));
+    try std.testing.expect(strictModeFromEnv("True"));
+    try std.testing.expect(strictModeFromEnv("yes"));
+    try std.testing.expect(strictModeFromEnv("YES"));
+    try std.testing.expect(strictModeFromEnv("on"));
+    try std.testing.expect(strictModeFromEnv("ON"));
+
+    // Falsy values — empty string, explicit "off"-style words, garbage
+    try std.testing.expect(!strictModeFromEnv(""));
+    try std.testing.expect(!strictModeFromEnv("0"));
+    try std.testing.expect(!strictModeFromEnv("false"));
+    try std.testing.expect(!strictModeFromEnv("False"));
+    try std.testing.expect(!strictModeFromEnv("no"));
+    try std.testing.expect(!strictModeFromEnv("off"));
+    try std.testing.expect(!strictModeFromEnv("OFF"));
+    try std.testing.expect(!strictModeFromEnv("nope"));
+    try std.testing.expect(!strictModeFromEnv("2"));
+    try std.testing.expect(!strictModeFromEnv("yes please"));
+    try std.testing.expect(!strictModeFromEnv(" 1"));
+    try std.testing.expect(!strictModeFromEnv("1 "));
 }

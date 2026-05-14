@@ -47,6 +47,26 @@ var g_audit: ?*SessionAudit = null;
 // replace this with a Buffer ring.
 var g_initial_buffer_storage: Buffer = undefined;
 
+// ─── Sandbox strict mode ────────────────────────────────────────────────
+//
+// `MAST_SANDBOX_STRICT` toggles whether the host applies its v1 default
+// policy (auto-grant `exec` so first-party verbs work out of the box) or
+// runs the production binary with the same default-deny posture the unit
+// tests prove on a fresh VM. When strict, NO capabilities are granted at
+// startup: `M-x stax-search`, `M-x stax-dashboard`, `M-x stax-hunger`,
+// `(os/shell ...)`, and any other `exec`-requiring verb will fail with
+// the standard "denied — capability `exec` not granted" panic.
+//
+// Parser lives in sandbox.zig so the unit test can exercise it without
+// dragging main.zig into a test target.
+
+fn read_strict_env() bool {
+    const raw = libc.getenv("MAST_SANDBOX_STRICT");
+    if (raw == null) return false;
+    const s = std.mem.span(@as([*:0]const u8, @ptrCast(raw.?)));
+    return sandbox.strictModeFromEnv(s);
+}
+
 // ─── Janet C-functions ──────────────────────────────────────────────────
 
 fn cmd_stax_pid(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
@@ -436,7 +456,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     try audit.write("sandbox-applied", .{ .replaced = replaced_bindings });
 
-    // HOST POLICY (v1): grant `exec` at startup because mast's own
+    // HOST POLICY (v1): by default grant `exec` at startup because mast's own
     // first-party verbs (`M-x stax-search`, `M-x stax-dashboard`,
     // `M-x stax-hunger`) shell out via `stax-bash`, AND fall-through Janet
     // expressions are evaluated in the same env. Without this grant the
@@ -446,8 +466,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // a fresh, default-deny capability set even though init.janet had
     // exec. See SANDBOX_THREAT_MODEL.md §"v1 host policy" + §"What v1
     // does NOT defend against".
-    sandbox.grant(.exec);
-    try audit.write("sandbox-grant", .{ .capability = "exec", .scope = "host-policy-v1" });
+    //
+    // STRICT MODE: if MAST_SANDBOX_STRICT is set to a truthy value
+    // (1/true/yes/on, case-insensitive), the auto-grant is suppressed.
+    // The production binary then exhibits the same default-deny posture
+    // the sandbox unit tests prove on a fresh VM — first-party verbs that
+    // need `exec` fail loudly with the standard panic. This moves the
+    // sandbox claim from "mechanism-proven in tests" to
+    // "deny-by-default observable in the production binary".
+    const strict = read_strict_env();
+    if (strict) {
+        try audit.write("sandbox-strict-mode", .{ .source = "MAST_SANDBOX_STRICT", .auto_grant_exec = false });
+        print("mast: MAST_SANDBOX_STRICT enabled — `exec` capability NOT auto-granted. " ++
+              "Verbs that shell out (stax-search/dashboard/hunger, os/shell, stax-bash) " ++
+              "will fail with `denied capability: exec`.\n", .{});
+    } else {
+        sandbox.grant(.exec);
+        try audit.write("sandbox-grant", .{ .capability = "exec", .scope = "host-policy-v1" });
+    }
 
     // Open initial file as :file buffer if provided. Routes through the
     // global storage slot so runtime-created buffers (via M-x save-as) share
