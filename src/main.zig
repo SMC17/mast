@@ -197,7 +197,7 @@ fn parse_mx_line(allocator: Allocator, line: []const u8) !?ParsedMx {
 fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) !void {
     var line_buf: [4096]u8 = undefined;
 
-    print("mast v1.1.0 — single-binary editor kernel\n", .{});
+    print("mast v1.2.0 — single-binary editor kernel\n", .{});
     print("Type 'M-x help' or just 'help'. Ctrl-D to quit.\n\n", .{});
 
     var leftover_buf: [4096]u8 = undefined;
@@ -422,7 +422,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return;
         }
         if (std.mem.eql(u8, a, "--version")) {
-            print("mast v1.1.0\n", .{});
+            print("mast v1.2.0\n", .{});
             return;
         }
         initial_file = try allocator.dupe(u8, a);
