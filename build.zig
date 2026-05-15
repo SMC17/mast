@@ -117,4 +117,26 @@ pub fn build(b: *std.Build) void {
     integration_smoke.setEnvironmentVariable("MAST_BIN", b.getInstallPath(.bin, "mast"));
     integration_smoke.step.dependOn(b.getInstallStep());
     test_step.dependOn(&integration_smoke.step);
+
+    // `zig build doctest` — README claim verification.
+    //
+    // Same discipline as zig-cobs / zig-frame-protocol / zig-graph /
+    // zig-h3: every executable claim in README.md (build steps,
+    // documented CLI flags, M-x verbs, the Janet quickstart
+    // `(+ 1 2)` → 3, the MAST_SANDBOX_STRICT env-var posture,
+    // examples/init.janet) is exercised against the shipped binary.
+    //
+    // The script is bash so it stays insulated from Zig 0.16 std.process
+    // churn — same rationale as strict_mode_integration.sh. The doctest
+    // step depends on the install step so $MAST_BIN exists before checks
+    // run, and reuses strict_mode_integration.sh wholesale for the
+    // strict-mode cases (one canonical script, two callers).
+    const doctest = b.addSystemCommand(&.{
+        "bash",
+        "tools/doctest.sh",
+    });
+    doctest.setEnvironmentVariable("MAST_BIN", b.getInstallPath(.bin, "mast"));
+    doctest.step.dependOn(b.getInstallStep());
+    const doctest_step = b.step("doctest", "Verify README executable claims against the shipped binary");
+    doctest_step.dependOn(&doctest.step);
 }
