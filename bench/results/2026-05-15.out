@@ -1,0 +1,21 @@
+# mast bench results — 2026-05-15
+# host: Linux 7.0.3-arch1-1 x86_64
+# cpu: Intel(R) Core(TM) i7-1065G7 CPU @ 1.30GHz
+# zig: 0.16.0
+
+# mast bench: buffer protocol (ReleaseFast, MONOTONIC ns)
+bench=fromBytes size=16 iters=200000 total_ns=14044504 ns_per_op=70 ops_per_sec=14240445
+bench=fromBytes size=256 iters=200000 total_ns=11140718 ns_per_op=55 ops_per_sec=17952164
+bench=fromBytes size=4096 iters=50000 total_ns=4673519 ns_per_op=93 ops_per_sec=10698576
+bench=fromBytes size=65536 iters=5000 total_ns=223232377 ns_per_op=44646 ops_per_sec=22398
+bench=append chunks_per_buf=10 iters=5000 total_appends=50000 total_ns=3644689 ns_per_append=72 appends_per_sec=13718591
+bench=append chunks_per_buf=100 iters=5000 total_appends=500000 total_ns=50975414 ns_per_append=101 appends_per_sec=9808650
+bench=append chunks_per_buf=1000 iters=500 total_appends=500000 total_ns=207349814 ns_per_append=414 appends_per_sec=2411383
+bench=setContents size=16 iters=200000 total_ns=7674789 ns_per_op=38 ops_per_sec=26059348
+bench=setContents size=256 iters=200000 total_ns=9889581 ns_per_op=49 ops_per_sec=20223303
+bench=setContents size=4096 iters=50000 total_ns=4578838 ns_per_op=91 ops_per_sec=10919801
+bench=setContents size=65536 iters=5000 total_ns=291603422 ns_per_op=58320 ops_per_sec=17146
+bench=save size=16 iters=5000 total_ns=108590572 ns_per_op=21718 ops_per_sec=46044
+bench=save size=256 iters=5000 total_ns=106704652 ns_per_op=21340 ops_per_sec=46858
+bench=save size=4096 iters=2000 total_ns=37504883 ns_per_op=18752 ops_per_sec=53326
+bench=save size=65536 iters=500 total_ns=15872941 ns_per_op=31745 ops_per_sec=31500
