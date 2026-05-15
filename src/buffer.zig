@@ -48,12 +48,8 @@ pub const Buffer = struct {
 
         const buf = try allocator.alloc(u8, size);
         errdefer allocator.free(buf);
-        var read_total: usize = 0;
-        while (read_total < size) {
-            const rc = libc.read(fd, buf.ptr + read_total, size - read_total);
-            if (rc <= 0) break;
-            read_total += @intCast(rc);
-        }
+        var reader = LibcFdReader{ .fd = fd };
+        _ = readToBuffer(reader.readerFn(), &reader, buf);
         return Buffer{
             .kind = .file,
             .name = try allocator.dupe(u8, path),
@@ -176,6 +172,47 @@ pub const Buffer = struct {
     }
 };
 
+/// Function-pointer signature for a "read N bytes into ptr, return isize"
+/// callable. Matches libc.read's shape. Returning <= 0 (EOF or error)
+/// terminates `readToBuffer`. This indirection exists so the read loop in
+/// `Buffer.fromFile` can be unit-tested deterministically against partial-
+/// EOF (read returns 0 before the requested size is filled) without needing
+/// a real pipe/socket fixture.
+pub const ReadFn = *const fn (ctx: *anyopaque, ptr: [*]u8, len: usize) isize;
+
+/// Drain a reader into `buf` until either `buf.len` bytes have been read
+/// or the reader returns <= 0 (EOF or error). Returns the number of bytes
+/// actually written into `buf`.
+///
+/// The boundary that mutation operator M09 targets is the `rc <= 0 break`
+/// guard: on a partial EOF (read returns 0 before buf is filled), the
+/// loop MUST break or it spins forever calling read(). The accompanying
+/// test `readToBuffer: terminates on partial-EOF` pins this.
+pub fn readToBuffer(read_fn: ReadFn, ctx: *anyopaque, buf: []u8) usize {
+    var read_total: usize = 0;
+    while (read_total < buf.len) {
+        const rc = read_fn(ctx, buf.ptr + read_total, buf.len - read_total);
+        if (rc <= 0) break;
+        read_total += @intCast(rc);
+    }
+    return read_total;
+}
+
+/// Thin libc-backed reader that adapts `libc.read(fd, ...)` to the
+/// `ReadFn` shape. The fd is borrowed; the caller owns lifetime.
+const LibcFdReader = struct {
+    fd: c_int,
+
+    fn read(ctx: *anyopaque, ptr: [*]u8, len: usize) isize {
+        const self: *LibcFdReader = @ptrCast(@alignCast(ctx));
+        return libc.read(self.fd, ptr, len);
+    }
+
+    fn readerFn(_: *LibcFdReader) ReadFn {
+        return &LibcFdReader.read;
+    }
+};
+
 fn writeAtomically(allocator: std.mem.Allocator, path: []const u8, contents: []const u8) !usize {
     // Compose a temp path next to the target so rename(2) is atomic on the
     // same filesystem. PID disambiguates concurrent writers in the same dir.
@@ -213,6 +250,78 @@ fn writeAtomically(allocator: std.mem.Allocator, path: []const u8, contents: []c
         return error.RenameFailed;
     }
     return written;
+}
+
+/// Test-only reader: returns `first_chunk` bytes once, then 0 (EOF)
+/// forever — modeling a pipe/socket that closed mid-stream after writing
+/// fewer bytes than the caller expected. The `safety_cap` exists so that
+/// if `readToBuffer`'s EOF-break is removed (mutation operator M09:
+/// `rc <= 0` → `rc < 0`), the test terminates rather than hanging the
+/// whole test binary — we then prove the mutant ran past the expected
+/// call count via `call_count`.
+const PartialEofReader = struct {
+    first_chunk: usize,
+    chunk_byte: u8 = 'A',
+    call_count: usize = 0,
+    safety_cap: usize = 1024,
+
+    fn read(ctx: *anyopaque, ptr: [*]u8, len: usize) isize {
+        const self: *PartialEofReader = @ptrCast(@alignCast(ctx));
+        self.call_count += 1;
+        if (self.call_count > self.safety_cap) return -1; // escape hatch
+        if (self.call_count == 1) {
+            const n = @min(self.first_chunk, len);
+            var i: usize = 0;
+            while (i < n) : (i += 1) ptr[i] = self.chunk_byte;
+            return @intCast(n);
+        }
+        return 0; // EOF on every subsequent call
+    }
+
+    fn readerFn() ReadFn {
+        return &PartialEofReader.read;
+    }
+};
+
+test "readToBuffer: terminates on partial-EOF (pins M09 boundary)" {
+    // size=10, reader delivers 5 bytes then EOF. The original loop must
+    // break after the second call (rc==0). A mutant `rc < 0 break` would
+    // spin forever calling read(); the reader's safety_cap converts that
+    // hang into a finite-but-large call_count we can assert against.
+    var reader = PartialEofReader{ .first_chunk = 5, .chunk_byte = 'X' };
+    var buf: [10]u8 = undefined;
+    @memset(&buf, 0);
+    const n = readToBuffer(PartialEofReader.readerFn(), &reader, &buf);
+
+    // Under the live (un-mutated) implementation:
+    //   - 5 bytes delivered, then EOF break
+    //   - exactly 2 read() calls
+    try std.testing.expectEqual(@as(usize, 5), n);
+    try std.testing.expectEqual(@as(usize, 2), reader.call_count);
+    try std.testing.expectEqual(@as(u8, 'X'), buf[0]);
+    try std.testing.expectEqual(@as(u8, 'X'), buf[4]);
+    try std.testing.expectEqual(@as(u8, 0), buf[5]); // untouched
+}
+
+test "readToBuffer: fills buffer when reader delivers exactly size bytes" {
+    // Sanity case: reader returns full requested size in one call, loop
+    // exits via the `read_total < buf.len` guard, no EOF break needed.
+    const FullReader = struct {
+        called: bool = false,
+        fn read(ctx: *anyopaque, ptr: [*]u8, len: usize) isize {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.called) return 0;
+            self.called = true;
+            var i: usize = 0;
+            while (i < len) : (i += 1) ptr[i] = 'Q';
+            return @intCast(len);
+        }
+    };
+    var r = FullReader{};
+    var buf: [8]u8 = undefined;
+    const n = readToBuffer(&FullReader.read, &r, &buf);
+    try std.testing.expectEqual(@as(usize, 8), n);
+    for (buf) |c| try std.testing.expectEqual(@as(u8, 'Q'), c);
 }
 
 test "buffer.fromBytes round-trips" {
