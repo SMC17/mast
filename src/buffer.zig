@@ -368,6 +368,107 @@ test "buffer.save round-trips a :file buffer atomically" {
     _ = libc.unlink(@ptrCast(c_path.ptr));
 }
 
+// ---------------------------------------------------------------------------
+// Property-based tests on the buffer protocol. 5000-trial corpora establish
+// load-bearing invariants under randomized input.
+// ---------------------------------------------------------------------------
+
+test "property: fromBytes is byte-identity round-trip across 5000 random shapes" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x1234_abcd_5678_ef01);
+    const rand = prng.random();
+    var trial: usize = 0;
+    while (trial < 5000) : (trial += 1) {
+        const len = rand.intRangeAtMost(usize, 0, 256);
+        const bytes = try a.alloc(u8, len);
+        defer a.free(bytes);
+        rand.bytes(bytes);
+        var b = try Buffer.fromBytes(a, .agent, "p", bytes);
+        defer b.deinit();
+        try std.testing.expectEqualSlices(u8, bytes, b.contents);
+    }
+}
+
+test "property: append is monotonic + total-byte-conserving across 1000 sequences" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xdead_beef_1234_5678);
+    const rand = prng.random();
+    var trial: usize = 0;
+    while (trial < 1000) : (trial += 1) {
+        var b = try Buffer.fromBytes(a, .agent, "p", "");
+        defer b.deinit();
+        const num_appends = rand.intRangeAtMost(usize, 0, 20);
+        var expected_size: usize = 0;
+        var k: usize = 0;
+        while (k < num_appends) : (k += 1) {
+            const chunk_len = rand.intRangeAtMost(usize, 0, 32);
+            const chunk = try a.alloc(u8, chunk_len);
+            defer a.free(chunk);
+            for (chunk) |*c| c.* = rand.intRangeAtMost(u8, 'a', 'z');
+            try b.append(chunk);
+            expected_size += chunk_len;
+            try std.testing.expectEqual(expected_size, b.contents.len);
+        }
+        // After at least one append, dirty must be true (if num_appends>0).
+        if (num_appends > 0) try std.testing.expect(b.dirty);
+    }
+}
+
+test "property: setContents is destructive replacement + dirty across 1000 trials" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xcafe_babe_0000_face);
+    const rand = prng.random();
+    var trial: usize = 0;
+    while (trial < 1000) : (trial += 1) {
+        const orig_len = rand.intRangeAtMost(usize, 0, 64);
+        const orig = try a.alloc(u8, orig_len);
+        defer a.free(orig);
+        rand.bytes(orig);
+        var b = try Buffer.fromBytes(a, .agent, "p", orig);
+        defer b.deinit();
+        try std.testing.expect(!b.dirty);
+        try std.testing.expectEqualSlices(u8, orig, b.contents);
+
+        const new_len = rand.intRangeAtMost(usize, 0, 64);
+        const new_bytes = try a.alloc(u8, new_len);
+        defer a.free(new_bytes);
+        rand.bytes(new_bytes);
+        try b.setContents(new_bytes);
+        try std.testing.expectEqualSlices(u8, new_bytes, b.contents);
+        try std.testing.expect(b.dirty);
+    }
+}
+
+test "property: save+fromFile round-trips 200 random buffers byte-for-byte" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x0123_4567_89ab_cdef);
+    const rand = prng.random();
+    var trial: usize = 0;
+    while (trial < 200) : (trial += 1) {
+        const len = rand.intRangeAtMost(usize, 0, 1024);
+        const bytes = try a.alloc(u8, len);
+        defer a.free(bytes);
+        rand.bytes(bytes);
+
+        var path_buf: [256]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "/tmp/mast-prop-{d}-{d}.bin", .{ libc.getpid(), trial });
+
+        var b = try Buffer.fromBytes(a, .file, path, bytes);
+        defer b.deinit();
+        b.dirty = true;
+        const n = try b.save();
+        try std.testing.expectEqual(len, n);
+
+        var b2 = try Buffer.fromFile(a, path);
+        defer b2.deinit();
+        try std.testing.expectEqualSlices(u8, bytes, b2.contents);
+
+        const c_path = try a.dupeZ(u8, path);
+        defer a.free(c_path);
+        _ = libc.unlink(@ptrCast(c_path.ptr));
+    }
+}
+
 test "buffer.saveAs converts an :agent buffer into a :file buffer" {
     const a = std.testing.allocator;
     var tmp_path_buf: [256]u8 = undefined;
