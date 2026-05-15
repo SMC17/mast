@@ -6,6 +6,57 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Honesty correction — 2026-05-15
+
+Prior `v1.0` / `v1.1` / "production-grade hygiene milestone" framing was a
+Type-I error class per the no-premature-production-claims doctrine:
+
+- **Zig itself is on 0.16, not 1.0.** No Zig project can credibly claim
+  API stability beyond "stable on Zig 0.16 today" until the language
+  itself ships 1.0. The v1.x git tags are honored for changelog
+  continuity, but every reader should treat this as **pre-1.0 in semver
+  spirit** until both that gate and a real-deployment gate close.
+- **Zero production deployment exists.** No real-traffic operation, no
+  soak time, no incident history. The hygiene work
+  (LICENSE / SECURITY / CONTRIBUTING / CI / CODE_OF_CONDUCT / dependabot
+  / CODEOWNERS) is real. The production claim it implied **wasn't
+  earned.**
+
+The mechanism work this cycle is what it is — neither more nor less:
+
+- **Sandbox capability model is mechanism-proven on one binding.** The
+  M01 mutation (the `g_sandbox.has(.exec)` sense flip on `os/shell`) is
+  KILLED by the test suite. The load-bearing security check is
+  mutation-resistant — that is the strongest honest claim. It is **not**
+  a claim that mast is sandboxed; `docs/SANDBOX_THREAT_MODEL.md` §1 lists
+  every still-ungated Janet binding (`os/execute`, `os/spawn`, `file/*`,
+  `net/*`, `native`, `unmarshal`, `os/exit`).
+- **`MAST_SANDBOX_STRICT` is posture-observable end-to-end.** Five
+  integration cases (`tests/strict_mode_integration.sh`) spawn the built
+  binary with the env var set and assert deny-on-stderr. This is
+  observability of the gate that exists — not retroactive coverage of
+  the residual ungated surface.
+- **Buffer protocol + atomic file-write are unit-tested** (round-trip,
+  append + dirty flag, atomic tmp+fsync+rename save, saveAs
+  kind-conversion, partial-EOF reader-mock pinning the M09 boundary).
+  That is `unit-tested`, not `integration-tested` against real editor
+  workflows.
+- **README/code drift is gated by 12/12 doctest checks** in
+  `tools/doctest.sh`, including the 5/5 strict-mode integration cases it
+  delegates to. The doctest gates README-to-binary drift, not narrative
+  accuracy of design docs.
+- **Mutation score is 8/10** (80%) after M09 closure, with the two
+  survivors (M08 fd-zero, M10 mark-clamp no-op) classified honestly as
+  equivalent mutants in `CHANGELOG.md` and `tools/mutation-test.sh`.
+
+Going forward, the AGENT_HARNESS proof vocabulary (`scaffold` /
+`compiled` / `unit-tested` / `integration-tested` / `audited` /
+`benchmarked` / `hardware-verified`) is used strictly. See `STATUS.md`
+for the per-component proof index and the gates (G1 real Janet under
+load; G2 wrap the residual `os/execute`, `os/spawn`, `file/*`, `net/*`,
+`native`, `unmarshal`, `os/exit` surface; G3 soak time; G4 independent
+security review; G5 Zig 1.0) that would justify a stronger claim.
+
 ### Added
 
 - **`tools/doctest.sh` + `zig build doctest`** — README claim verification harness. Twelve checks against the shipped binary, each one tied to an executable claim in `README.md`: documented build steps (`zig build`, `zig build test`) exist; `mast --help` prints the documented `usage: mast …` line; built-in M-x verbs `help` / `pid` / `exit` work as documented; the README Janet quickstart `M-x (+ 1 2)` → `→ 3` evaluates to the documented answer; `examples/init.janet` (referenced from README §Extending) loads on startup without a Janet parse/eval error and exposes the documented `(hello "world")` → `"hello, world"`; `MAST_SANDBOX_STRICT=1` strict-mode posture is observable end-to-end (delegates to `tests/strict_mode_integration.sh`, 5/5 cases); and `M-x stax-search` is gated under strict mode. 12/12 PASS. Same documentation-test discipline shipped in `zig-cobs`, `zig-frame-protocol`, `zig-graph`, `zig-h3`. The doctest step depends on the install step so the binary is present before checks run, and reuses `strict_mode_integration.sh` rather than duplicating its 5 cases. **README/code drift surfaced and annotated**: `README §Run` shows `M-x stax-search "query here"` with a quoted multi-word arg, but `parse_mx_line()` in `src/main.zig` whitespace-splits before any quote-aware handling, so the quoted form parse-errors via the Janet fall-through. The doctest exercises the unquoted form and the comment in `tools/doctest.sh` (Check 8) names the drift so a follow-up can either teach the parser about quotes or correct the README.
