@@ -139,4 +139,41 @@ pub fn build(b: *std.Build) void {
     doctest.step.dependOn(b.getInstallStep());
     const doctest_step = b.step("doctest", "Verify README executable claims against the shipped binary");
     doctest_step.dependOn(&doctest.step);
+
+    // `zig build bench-buffer` — buffer-protocol throughput benchmark.
+    // Reports parseable bench=NAME ... ns_per_op=N lines to stderr.
+    const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const buffer_module = b.createModule(.{
+        .root_source_file = b.path("src/buffer.zig"),
+        .target = target,
+        .optimize = bench_optimize,
+    });
+    buffer_module.link_libc = true;
+    buffer_module.linkSystemLibrary("m", .{});
+    if (t.os.tag == .linux) {
+        buffer_module.linkSystemLibrary("pthread", .{});
+        buffer_module.linkSystemLibrary("dl", .{});
+        buffer_module.linkSystemLibrary("rt", .{});
+    }
+    const bench_buffer_mod = b.createModule(.{
+        .root_source_file = b.path("bench/bench_buffer.zig"),
+        .target = target,
+        .optimize = bench_optimize,
+    });
+    bench_buffer_mod.addImport("buffer", buffer_module);
+    bench_buffer_mod.link_libc = true;
+    bench_buffer_mod.linkSystemLibrary("m", .{});
+    if (t.os.tag == .linux) {
+        bench_buffer_mod.linkSystemLibrary("pthread", .{});
+        bench_buffer_mod.linkSystemLibrary("dl", .{});
+        bench_buffer_mod.linkSystemLibrary("rt", .{});
+    }
+    const bench_buffer_exe = b.addExecutable(.{
+        .name = "bench-buffer",
+        .root_module = bench_buffer_mod,
+    });
+    const run_bench_buffer = b.addRunArtifact(bench_buffer_exe);
+    run_bench_buffer.has_side_effects = true;
+    const bench_step = b.step("bench-buffer", "Run buffer-protocol throughput benchmark");
+    bench_step.dependOn(&run_bench_buffer.step);
 }
