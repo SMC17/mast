@@ -4,7 +4,7 @@ Last touched: 2026-05-15
 
 ## Honest version posture
 
-Despite the `v1.0.0` and `v1.1.0` git tags, this project is **pre-1.0
+Despite the `v1.0.0`, `v1.1.0`, and `v1.2.0` git tags, this project is **pre-1.0
 in semver spirit** for two independent reasons:
 
 1. **Zig itself is on 0.16, not 1.0.** Until the Zig language hits
