@@ -274,6 +274,53 @@ test "grant: os/shell succeeds when exec capability is granted" {
     revokeAll();
 }
 
+test "gated_stax_bash: argc=1 succeeds; argc=0 / argc=2 panic (kills mutant M04)" {
+    // Mutation testing surfaced that `argc != 1 -> argc == 1` slipped
+    // through: no existing test called gated_stax_bash with the wrong
+    // number of arguments. This pins all three relevant argcs.
+    if (janet.janet_init() != 0) return error.JanetInitFailed;
+    defer janet.janet_deinit();
+
+    const env = janet.janet_core_env(null) orelse return error.NoCoreEnv;
+
+    revokeAll();
+    _ = applyDefaultDeny(env);
+
+    // Register gated_stax_bash exactly as main.zig does at startup.
+    janet.janet_def(
+        env,
+        "stax-bash",
+        janet.janet_wrap_cfunction(gated_stax_bash),
+        "mast-sandbox: capability-gated stax-bash — requires `exec`.",
+    );
+    grant(.exec);
+    defer revokeAll();
+
+    // (stax-bash "true") — argc == 1, must succeed.
+    {
+        const src = "(stax-bash \"true\")";
+        var out: janet.Janet = undefined;
+        const status = janet.janet_dostring(env, src.ptr, "stax-bash-argc1", &out);
+        try std.testing.expectEqual(@as(c_int, 0), status);
+    }
+
+    // (stax-bash) — argc == 0, must panic.
+    {
+        const src = "(stax-bash)";
+        var out: janet.Janet = undefined;
+        const status = janet.janet_dostring(env, src.ptr, "stax-bash-argc0", &out);
+        try std.testing.expect(status != 0);
+    }
+
+    // (stax-bash "a" "b") — argc == 2, must panic.
+    {
+        const src = "(stax-bash \"a\" \"b\")";
+        var out: janet.Janet = undefined;
+        const status = janet.janet_dostring(env, src.ptr, "stax-bash-argc2", &out);
+        try std.testing.expect(status != 0);
+    }
+}
+
 test "capability set: grant / has / revokeAll behave correctly" {
     var caps: CapabilitySet = .empty();
     try std.testing.expect(!caps.has(.exec));
