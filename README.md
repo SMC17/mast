@@ -132,7 +132,7 @@ default policy in place.
 
 ## Why "mast"
 
-A mast is the load-bearing spar everything hangs off — sails, rigging, cargo nets, flags. In the substrate metaphor it is the single primitive everything composes through: a buffer hangs off the protocol, an agent hangs off a buffer, an audit event hangs off an agent. The name is Lineage-compatible — the merchant marine is a recurring anchor in the [Lineage series](https://github.com/SMC17/stax-blog) of biographical merchant studies — without coining a new "sovereign-X" term.
+A mast is the load-bearing spar everything hangs off — sails, rigging, cargo nets, flags. In the substrate metaphor it is the single primitive everything composes through: a buffer hangs off the protocol, an agent hangs off a buffer, an audit event hangs off an agent.
 
 ## Architecture
 
@@ -160,6 +160,3 @@ Issues and discussion welcome. This is a v0.1 commit-zero — the substrate is s
 3. Platform smoke tests on architectures other than x86_64 Linux / arm64 macOS.
 4. A TUI renderer for v0.2 (`vaxis` is the leading candidate in the Zig ecosystem; bring receipts).
 
-## Companion writing
-
-The thesis that motivates this substrate is in [`apple-next-pixar-emacs`](https://github.com/SMC17/stax-blog) on the public blog. The broader Mercantile Thesis names the editor substrate as one of the eight appliance-layer axes the next decade will be decided on.
