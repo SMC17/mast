@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose a new buffer-kind, M-x verb, sandbox capability, or extension surface
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        mast is **pre-1.0 in semver spirit** — feature scope is gated
+        by the substrate gates in [STATUS.md](https://github.com/SMC17/mast/blob/main/STATUS.md).
+        New features should advance one of those gates, not orthogonal
+        to them.
+
+  - type: dropdown
+    id: gate
+    attributes:
+      label: Which substrate gate does this advance?
+      options:
+        - Buffer-as-protocol primitive
+        - M-x dispatcher / verb surface
+        - Janet extension layer
+        - Sandbox / capability model
+        - Atomic save / file I/O
+        - Visual TUI (v2 gate)
+        - Local inference daemon (v2 gate)
+        - Multi-buffer state (v2 gate)
+        - Other (specify in description)
+    validations:
+      required: true
+
+  - type: textarea
+    id: feature
+    attributes:
+      label: What feature?
+      description: One-paragraph description. Include proposed API surface.
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What workflow does this unlock?

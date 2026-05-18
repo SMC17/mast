@@ -1,0 +1,76 @@
+name: Bug report
+description: A bug in the buffer protocol, M-x dispatch, Janet runtime, or sandbox
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For correctness bugs in the buffer protocol (atomic save,
+        fromBytes/setContents/append), please include enough state for
+        repro: the buffer.contents bytes, the operation sequence, and
+        the expected vs actual final state.
+
+        For sandbox bugs (anything where MAST_SANDBOX_STRICT=1 lets
+        through an operation it shouldn't), file as a security
+        advisory instead — see SECURITY.md.
+
+  - type: input
+    id: zig-version
+    attributes:
+      label: Zig version
+      placeholder: "0.16.0"
+    validations:
+      required: true
+
+  - type: input
+    id: mast-version
+    attributes:
+      label: mast version / commit
+      placeholder: "v1.2.0 or commit hash"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Subsystem
+      options:
+        - Buffer protocol (fromBytes / setContents / append / save / saveAs)
+        - M-x dispatcher
+        - Janet runtime / C-callback
+        - Sandbox (os/shell deny, MAST_SANDBOX_STRICT)
+        - Build / CI
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Reproducer
+      description: Minimal commands or Janet snippet
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "Linux x86_64 / macOS arm64"
+    validations:
+      required: true

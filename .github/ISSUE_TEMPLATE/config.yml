@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: STATUS.md (pre-1.0 posture)
+    url: https://github.com/SMC17/mast/blob/main/STATUS.md
+    about: Read first — explains why v1.x tags are pre-1.0 in semver spirit.
+  - name: BENCH.md (perf numbers)
+    url: https://github.com/SMC17/mast/blob/main/BENCH.md
+    about: Buffer protocol throughput on i7-1065G7.
+  - name: API_STABILITY.md
+    url: https://github.com/SMC17/mast/blob/main/API_STABILITY.md
+    about: Stable vs unstable surfaces; deprecation policy.
+  - name: Security advisory
+    url: https://github.com/SMC17/mast/security/advisories/new
+    about: Sandbox bypass / MAST_SANDBOX_STRICT leak. File privately.
