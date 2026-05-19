@@ -6,6 +6,31 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.3.2 — agent/kill + TUI damage tracker (2026-05-19)
+
+Two more v1.3.0 honest-residuals closed:
+
+- **`(agent/kill handle)`.** Sends SIGTERM to the agent's process.
+  Returns boolean (true = signaled). Audited via `agent-kill` event.
+  Gated on `exec`. Reaping is still via `(agent/wait handle)` after.
+  Closes the "no `agent/kill handle` for in-session cancellation"
+  residual.
+- **TUI damage tracker.** `tui.render_to_buf` writes into a
+  caller-supplied byte buffer; `tui.FrameState` + `tui.emit_with_damage`
+  diff against the previous frame and skip the write when unchanged.
+  `tui.invalidate(state)` forces full redraw (resize / out-of-band
+  stdout writes). Repeated no-op keystrokes (unbound keys, scrolling
+  past EOF on a short buffer, holding a key) no longer trigger a
+  screen rewrite. Closes the "TUI is full-redraw per keystroke"
+  residual in the common case.
+
+Two new in-source tests cover the damage tracker
+(`render_to_buf produces deterministic output for the empty-buffer case`
++ `FrameState damage tracker skips emit when frame is unchanged`).
+
+`tools/cfunction-audit.sh` confirms 16 cfunctions / 3 gated /
+13 benign / 0 violations after the agent/kill addition.
+
 ### v1.3.x — residual closures + tooling (2026-05-19)
 
 Four residuals named in the v1.3.0 release notes closed in a single round:
