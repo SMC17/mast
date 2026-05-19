@@ -319,11 +319,11 @@ pub const FrameState = struct {
     }
 };
 
-/// Diff-emit: write `current` to stdout iff it differs from `state.last`
-/// (or the state demands a full redraw). Updates `state.last` to the
-/// emitted bytes. Returns true if bytes were written, false if frame
-/// was unchanged.
-pub fn emit_with_damage(
+/// Pure diff logic: returns true if `current` differs from the cached
+/// `state.last` (or `state.full_redraw` is set), and if so updates the
+/// cache. Does NOT write anywhere. Use this in tests + anywhere the
+/// caller wants to make their own decision about emit.
+pub fn frame_changed(
     state: *FrameState,
     allocator: std.mem.Allocator,
     current: []const u8,
@@ -331,10 +331,28 @@ pub fn emit_with_damage(
     if (!state.full_redraw and std.mem.eql(u8, current, state.last.items)) {
         return false;
     }
-    write_str(current);
     state.last.clearRetainingCapacity();
     state.last.appendSlice(allocator, current) catch {};
     state.full_redraw = false;
+    return true;
+}
+
+/// Diff-emit: write `current` to stdout iff it differs from `state.last`
+/// (or the state demands a full redraw). Updates `state.last` to the
+/// emitted bytes. Returns true if bytes were written, false if frame
+/// was unchanged.
+///
+/// This is `frame_changed` + `write_str(current)`. The split exists so
+/// tests can exercise the diff logic without triggering the stdout
+/// side-effect (which deadlocks under the Zig test runner's --listen=-
+/// stdout-capture transport).
+pub fn emit_with_damage(
+    state: *FrameState,
+    allocator: std.mem.Allocator,
+    current: []const u8,
+) bool {
+    if (!frame_changed(state, allocator, current)) return false;
+    write_str(current);
     return true;
 }
 
@@ -374,35 +392,38 @@ test "render_to_buf produces deterministic output for the empty-buffer case" {
     try std.testing.expect(out1.items.len > 0);
 }
 
-test "FrameState damage tracker skips emit when frame is unchanged" {
+test "FrameState damage tracker: frame_changed returns true on first call + cached comparison" {
+    // Uses the pure frame_changed helper instead of emit_with_damage so we
+    // don't write to stdout from inside the test (the Zig test runner's
+    // --listen=- transport blocks the test when stdout fills, causing the
+    // SIGTERM kill we observed when this test was first added).
     const allocator = std.testing.allocator;
     var state = FrameState{};
     defer state.deinit(allocator);
 
-    // Capture render output to a buffer (not stdout).
     var frame_a: std.ArrayList(u8) = .empty;
     defer frame_a.deinit(allocator);
     render_to_buf(&frame_a, allocator, null, 0, 0, 0, null);
 
-    // The first emit is always a full redraw (state.full_redraw = true).
-    const first = emit_with_damage(&state, allocator, frame_a.items);
+    // First call: always a full redraw (state.full_redraw = true).
+    const first = frame_changed(&state, allocator, frame_a.items);
     try std.testing.expect(first);
     try std.testing.expectEqualSlices(u8, frame_a.items, state.last.items);
 
-    // The second emit with identical frame bytes must skip (no write).
-    const second = emit_with_damage(&state, allocator, frame_a.items);
+    // Second call with identical bytes: must skip (frame unchanged).
+    const second = frame_changed(&state, allocator, frame_a.items);
     try std.testing.expect(!second);
 
-    // After invalidate(), the next emit must fire regardless of diff.
+    // After invalidate(): the next call must fire regardless of diff.
     invalidate(&state);
-    const third = emit_with_damage(&state, allocator, frame_a.items);
+    const third = frame_changed(&state, allocator, frame_a.items);
     try std.testing.expect(third);
 
-    // A different frame must trigger emit even without invalidate.
+    // A different frame: must trigger even without invalidate.
     var frame_b: std.ArrayList(u8) = .empty;
     defer frame_b.deinit(allocator);
-    render_to_buf(&frame_b, allocator, null, 5, 0, 0, null); // different scroll
-    const fourth = emit_with_damage(&state, allocator, frame_b.items);
+    render_to_buf(&frame_b, allocator, null, 5, 0, 0, null);
+    const fourth = frame_changed(&state, allocator, frame_b.items);
     try std.testing.expect(fourth);
     try std.testing.expectEqualSlices(u8, frame_b.items, state.last.items);
 }
