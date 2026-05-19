@@ -126,6 +126,7 @@ pub var g_sandbox: CapabilitySet = .{ .bits = 0 };
 
 fn gated_os_shell(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     if (!g_sandbox.has(.exec)) {
+        observe(.exec_gated);
         janet.janet_panicf(
             "mast.sandbox: os/shell denied — capability `exec` not granted (default-deny)",
         );
@@ -148,6 +149,7 @@ fn gated_os_shell(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
 /// the stax-bash surface respects the same default-deny posture.
 pub fn gated_stax_bash(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     if (!g_sandbox.has(.exec)) {
+        observe(.exec_gated);
         janet.janet_panicf(
             "mast.sandbox: stax-bash denied — capability `exec` not granted (default-deny)",
         );
@@ -160,6 +162,46 @@ pub fn gated_stax_bash(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Jane
     const c_str = @as([*c]const u8, @ptrCast(s_ptr));
     const rc: i32 = @intCast(libc.system(c_str));
     return janet.janet_wrap_integer(rc);
+}
+
+// ─── Deny-event observer (audit-log routing, v0.3.x) ───────────────────
+//
+// Closes residual #9 of docs/SANDBOX_THREAT_MODEL.md §6: previously every
+// removed-binding panic and every os/shell-without-exec deny went only to
+// stderr via janet_panicf. The host had no first-class hook to route deny
+// events into SessionAudit. The observer below lets main.zig register a
+// callback that fires BEFORE the panic propagates. The category — not the
+// individual symbol — is the audit grain; categories are the load-bearing
+// aggregation level for "what kind of capability did the script try to
+// reach for." Individual symbols still appear in Janet's stacktrace.
+
+pub const DenyCategory = enum {
+    /// os/shell or stax-bash invoked without `exec` capability.
+    exec_gated,
+    /// One of the removed-from-env subprocess primitives.
+    subprocess,
+    /// One of the removed file-I/O primitives.
+    file_io,
+    /// One of the removed network primitives.
+    net,
+    /// `native` (dynamic-module loading).
+    native,
+    /// `unmarshal` (bytecode deserialization).
+    unmarshal,
+    /// `os/exit` (host-lifecycle termination).
+    exit,
+    /// `dofile` (file-load combined with eval).
+    dofile,
+    /// Env-var bindings (os/getenv, os/setenv, os/environ).
+    env,
+    /// Ancillary filesystem-metadata bindings (os/stat, os/dir, os/mkdir, etc.).
+    fs_ancillary,
+};
+
+pub var g_deny_observer: ?*const fn (cat: DenyCategory) void = null;
+
+fn observe(cat: DenyCategory) void {
+    if (g_deny_observer) |f| f(cat);
 }
 
 // ─── Removed-binding stubs (G2 closure) ─────────────────────────────────
@@ -193,6 +235,7 @@ pub fn gated_stax_bash(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Jane
 fn panic_removed_subprocess(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
+    observe(.subprocess);
     janet.janet_panicf(
         "mast.sandbox: this subprocess primitive is REMOVED in v0.2 — " ++
             "use (os/shell ...) with `exec` capability instead. " ++
@@ -203,6 +246,7 @@ fn panic_removed_subprocess(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet
 fn panic_removed_file_io(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
+    observe(.file_io);
     janet.janet_panicf(
         "mast.sandbox: file-I/O bindings are REMOVED in v0.2 — " ++
             "use host buffer operations (M-x save / append) instead. " ++
@@ -214,6 +258,7 @@ fn panic_removed_file_io(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Ja
 fn panic_removed_net(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
+    observe(.net);
     janet.janet_panicf(
         "mast.sandbox: network bindings are REMOVED in v0.2 — " ++
             "host-bound HTTP cfunctions with explicit allowlists are v0.3 work. " ++
@@ -224,6 +269,7 @@ fn panic_removed_net(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet 
 fn panic_removed_native(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
+    observe(.native);
     janet.janet_panicf(
         "mast.sandbox: dynamic-module loading (native) is REMOVED in v0.2 — " ++
             "loaded native modules run arbitrary C in-process and bypass every gate. " ++
@@ -234,6 +280,7 @@ fn panic_removed_native(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Jan
 fn panic_removed_unmarshal(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
+    observe(.unmarshal);
     janet.janet_panicf(
         "mast.sandbox: unmarshal is REMOVED in v0.2 — " ++
             "marshal blobs carry executable bytecode; full-RCE primitive on attacker-controlled input. " ++
@@ -244,6 +291,7 @@ fn panic_removed_unmarshal(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.
 fn panic_removed_exit(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
+    observe(.exit);
     janet.janet_panicf(
         "mast.sandbox: os/exit is REMOVED in v0.2 — " ++
             "the host controls process lifecycle. Use `M-x exit` from the REPL. " ++
@@ -254,6 +302,7 @@ fn panic_removed_exit(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet
 fn panic_removed_dofile(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
+    observe(.dofile);
     janet.janet_panicf(
         "mast.sandbox: dofile is REMOVED in v0.2 — " ++
             "combines unguarded file read with eval; load scripts via init.janet only. " ++
@@ -264,6 +313,7 @@ fn panic_removed_dofile(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Jan
 fn panic_removed_env(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
+    observe(.env);
     janet.janet_panicf(
         "mast.sandbox: environment-variable bindings are REMOVED in v0.2.1 — " ++
             "env vars routinely carry secrets (TOKEN_*, AWS_*, ANTHROPIC_API_KEY); " ++
@@ -276,6 +326,7 @@ fn panic_removed_env(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet 
 fn panic_removed_fs_ancillary(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
+    observe(.fs_ancillary);
     janet.janet_panicf(
         "mast.sandbox: ancillary filesystem-metadata bindings are REMOVED in v0.2.1 — " ++
             "directory enumeration / stat / mkdir / rm / rename / chmod / symlink " ++
@@ -641,6 +692,70 @@ test "G2 closure: every REMOVED_BINDINGS entry panics from Janet" {
             return error.RemovedBindingDidNotPanic;
         }
     }
+}
+
+test "deny observer fires for both exec-gated denies and removed-binding panics" {
+    if (janet.janet_init() != 0) return error.JanetInitFailed;
+    defer janet.janet_deinit();
+
+    const env = janet.janet_core_env(null) orelse return error.NoCoreEnv;
+
+    revokeAll();
+    _ = applyDefaultDeny(env);
+
+    // Capture every observed category via a static counter array.
+    const Probe = struct {
+        var counts: [@typeInfo(DenyCategory).@"enum".fields.len]u32 = .{0} ** @typeInfo(DenyCategory).@"enum".fields.len;
+        fn observer(cat: DenyCategory) void {
+            counts[@intFromEnum(cat)] += 1;
+        }
+        fn reset() void {
+            for (&counts) |*c| c.* = 0;
+        }
+    };
+    Probe.reset();
+    g_deny_observer = &Probe.observer;
+    defer g_deny_observer = null;
+
+    // Exec-gated path: os/shell without exec capability.
+    {
+        const src = "(os/shell \"true\")";
+        var out: janet.Janet = undefined;
+        _ = janet.janet_dostring(env, src.ptr, "obs-exec", &out);
+    }
+    try std.testing.expectEqual(@as(u32, 1), Probe.counts[@intFromEnum(DenyCategory.exec_gated)]);
+
+    // Removed-binding path: os/execute should fire .subprocess.
+    {
+        const src = "(os/execute [\"true\"] :p)";
+        var out: janet.Janet = undefined;
+        _ = janet.janet_dostring(env, src.ptr, "obs-subprocess", &out);
+    }
+    try std.testing.expectEqual(@as(u32, 1), Probe.counts[@intFromEnum(DenyCategory.subprocess)]);
+
+    // file-io path
+    {
+        const src = "(slurp \"/etc/hostname\")";
+        var out: janet.Janet = undefined;
+        _ = janet.janet_dostring(env, src.ptr, "obs-fileio", &out);
+    }
+    try std.testing.expectEqual(@as(u32, 1), Probe.counts[@intFromEnum(DenyCategory.file_io)]);
+
+    // env path
+    {
+        const src = "(os/getenv \"HOME\")";
+        var out: janet.Janet = undefined;
+        _ = janet.janet_dostring(env, src.ptr, "obs-env", &out);
+    }
+    try std.testing.expectEqual(@as(u32, 1), Probe.counts[@intFromEnum(DenyCategory.env)]);
+
+    // fs-ancillary path
+    {
+        const src = "(os/dir \"/tmp\")";
+        var out: janet.Janet = undefined;
+        _ = janet.janet_dostring(env, src.ptr, "obs-fsanc", &out);
+    }
+    try std.testing.expectEqual(@as(u32, 1), Probe.counts[@intFromEnum(DenyCategory.fs_ancillary)]);
 }
 
 test "G2 closure: applyDefaultDeny returns the expected number of replacements" {

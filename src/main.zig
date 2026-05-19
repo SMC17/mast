@@ -31,6 +31,7 @@ const libc = @cImport({
     @cInclude("fcntl.h");
     @cInclude("sys/wait.h");
     @cInclude("signal.h");
+    @cInclude("poll.h");
 });
 
 const Allocator = std.mem.Allocator;
@@ -99,6 +100,12 @@ fn prevBuffer() usize {
 //
 // Parser lives in sandbox.zig so the unit test can exercise it without
 // dragging main.zig into a test target.
+
+fn onSandboxDeny(cat: sandbox.DenyCategory) void {
+    if (g_audit) |a| {
+        a.write("sandbox-deny", .{ .category = @tagName(cat) }) catch {};
+    }
+}
 
 fn read_strict_env() bool {
     const raw = libc.getenv("MAST_SANDBOX_STRICT");
@@ -370,8 +377,12 @@ fn cmd_agent_poll(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
 }
 
 /// `(agent/wait handle)` — block until the agent exits, return exit status.
-/// Internally a poll loop with 10ms sleeps. v0.3.x will route through
-/// poll(2) on the stdout_fd + the child for a true select-based wait.
+/// Uses poll(2) on the stdout_fd with a 500ms backstop timeout. The
+/// `poll` returns immediately when stdout has bytes ready or hits EOF
+/// (which is how the kernel signals "child closed the pipe write end" —
+/// almost always == process exit). The 500ms backstop covers the rare
+/// case of a child that exits WITHOUT closing stdout (eg. a grandchild
+/// still holding it) so we still notice exit via WNOHANG waitpid.
 fn cmd_agent_wait(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     if (argc != 1) {
         janet.janet_panicf("agent/wait: expected 1 integer argument (handle), got %d", argc);
@@ -393,11 +404,26 @@ fn cmd_agent_wait(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
 
     const allocator = std.heap.c_allocator;
     while (!h.closed) {
-        _ = agentDrain(allocator, h);
-        var status: c_int = 0;
-        const rc = libc.waitpid(@intCast(h.pid), &status, libc.WNOHANG);
+        // poll(2) on the stdout fd. Returns when:
+        //   - revents & POLLIN: bytes ready → drain
+        //   - revents & POLLHUP: pipe write end closed → child likely exited
+        //   - timeout: 500ms elapsed without activity → fall through to waitpid
+        var pfd: libc.struct_pollfd = .{
+            .fd = h.stdout_fd,
+            .events = libc.POLLIN,
+            .revents = 0,
+        };
+        const rc = libc.poll(@ptrCast(&pfd), 1, 500);
         if (rc > 0) {
             _ = agentDrain(allocator, h);
+        }
+        // Whether or not the poll woke us, also do a non-blocking exit check.
+        // The pipe can produce POLLIN even after the child exited (final
+        // buffered bytes); waitpid is the authoritative exit detection.
+        var status: c_int = 0;
+        const wrc = libc.waitpid(@intCast(h.pid), &status, libc.WNOHANG);
+        if (wrc > 0) {
+            _ = agentDrain(allocator, h); // final drain
             h.closed = true;
             h.exit_status = @intCast((status >> 8) & 0xff);
             _ = libc.close(h.stdout_fd);
@@ -410,8 +436,8 @@ fn cmd_agent_wait(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
             }
             break;
         }
-        if (rc < 0) break;
-        _ = libc.usleep(10_000); // 10ms
+        if (wrc < 0) break;
+        // wrc == 0 means still running; loop back to poll
     }
     return janet.janet_wrap_integer(h.exit_status);
 }
@@ -959,6 +985,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // below — applyDefaultDeny itself is side-effect-free w.r.t. the audit.)
     const replaced_bindings = sandbox.applyDefaultDeny(env.?);
 
+    // Route sandbox-deny events into the session audit log. Closes
+    // docs/SANDBOX_THREAT_MODEL.md §6 residual #9. The observer fires
+    // BEFORE the panic propagates, so even unrecoverable denies leave a
+    // trace in the audit log before Janet's stacktrace surfaces to stderr.
+    sandbox.g_deny_observer = &onSandboxDeny;
+
     // Session audit log
     var audit = try SessionAudit.init(allocator, @intCast(libc.getpid()));
     defer audit.deinit();
@@ -1156,6 +1188,11 @@ fn run_tui(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) !
 /// Routes through parse_mx_line, the builtin table, and falls through to
 /// raw Janet eval. The TUI variant suppresses the print() side-effects
 /// the REPL emits; results are visible on the next full-redraw.
+///
+/// Sentinel verbs that mutate buffer state (append / save / save-as /
+/// new-buffer) ARE handled here so the TUI minibuffer can drive them.
+/// Display-only sentinels (help / display / list-buffers) are skipped
+/// because the TUI already renders that state inline.
 fn execute_mx_line(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit, line: []const u8) !void {
     const parsed = (try parse_mx_line(allocator, line)) orelse return;
     defer allocator.free(parsed.args);
@@ -1173,20 +1210,87 @@ fn execute_mx_line(allocator: Allocator, env: *janet.JanetTable, audit: *Session
         }
     }
 
-    // For the TUI prototype, sentinel verbs (display/save/etc) are handled
-    // by the existing REPL render path or by direct buffer ops — for the
-    // first pass we route only Janet-expressible builtins + raw eval. The
-    // user can still reach M-x save / append etc. by issuing them from the
-    // line REPL session; the TUI is the "view + agent driver" surface.
-    const janet_src = if (found) |b| blk: {
+    if (found) |b| {
+        if (std.mem.eql(u8, b.janet_expr, "MAST_APPEND_SENTINEL")) {
+            if (currentBuffer()) |buf| {
+                var combined: std.ArrayList(u8) = .empty;
+                defer combined.deinit(allocator);
+                for (parsed.args, 0..) |arg, i_arg| {
+                    if (i_arg > 0) try combined.append(allocator, ' ');
+                    try combined.appendSlice(allocator, arg);
+                }
+                try combined.append(allocator, '\n');
+                buf.append(combined.items) catch |e| {
+                    try audit.write("mx-append-error", .{ .err = @errorName(e) });
+                    return;
+                };
+                try audit.write("buffer-append", .{ .bytes = combined.items.len, .via = "tui" });
+            }
+            return;
+        }
+        if (std.mem.eql(u8, b.janet_expr, "MAST_SAVE_SENTINEL")) {
+            if (currentBuffer()) |buf| {
+                _ = buf.save() catch |e| {
+                    try audit.write("mx-save-error", .{ .err = @errorName(e), .path = buf.name });
+                    return;
+                };
+                try audit.write("buffer-save", .{ .path = buf.name, .via = "tui" });
+            }
+            return;
+        }
+        if (std.mem.eql(u8, b.janet_expr, "MAST_SAVEAS_SENTINEL")) {
+            if (parsed.args.len == 0) {
+                try audit.write("mx-saveas-error", .{ .err = "missing-path", .via = "tui" });
+                return;
+            }
+            if (currentBuffer() == null) {
+                const new_buf = Buffer.fromBytes(allocator, .file, parsed.args[0], "") catch |e| {
+                    try audit.write("mx-saveas-error", .{ .err = @errorName(e), .via = "tui" });
+                    return;
+                };
+                _ = addBuffer(allocator, new_buf) catch |e| {
+                    try audit.write("mx-saveas-error", .{ .err = @errorName(e), .via = "tui" });
+                    return;
+                };
+                try audit.write("buffer-create", .{ .path = parsed.args[0], .kind = "file", .via = "tui" });
+            }
+            if (currentBuffer()) |buf| {
+                _ = buf.saveAs(parsed.args[0]) catch |e| {
+                    try audit.write("mx-saveas-error", .{ .err = @errorName(e), .path = parsed.args[0] });
+                    return;
+                };
+                try audit.write("buffer-saveas", .{ .path = parsed.args[0], .via = "tui" });
+            }
+            return;
+        }
+        if (std.mem.eql(u8, b.janet_expr, "MAST_NEWBUFFER_SENTINEL")) {
+            if (parsed.args.len == 0) {
+                try audit.write("mx-newbuffer-error", .{ .err = "missing-name", .via = "tui" });
+                return;
+            }
+            const new_buf = Buffer.fromBytes(allocator, .agent, parsed.args[0], "") catch |e| {
+                try audit.write("mx-newbuffer-error", .{ .err = @errorName(e), .via = "tui" });
+                return;
+            };
+            const new_idx = addBuffer(allocator, new_buf) catch |e| {
+                try audit.write("mx-newbuffer-error", .{ .err = @errorName(e), .via = "tui" });
+                return;
+            };
+            try audit.write("buffer-create", .{ .name = parsed.args[0], .kind = "agent", .index = new_idx, .via = "tui" });
+            return;
+        }
         if (std.mem.startsWith(u8, b.janet_expr, "MAST_")) {
-            // Sentinel verb — punt for v0.3 TUI prototype. The line REPL
-            // remains the place to drive these.
+            // Display-only sentinels (help / display / list-buffers): skip
+            // in the TUI because the TUI already renders that state inline.
             try audit.write("tui-sentinel-skipped", .{ .verb = parsed.verb });
             return;
         }
-        break :blk try substitute_args(allocator, b.janet_expr, parsed.args);
-    } else try allocator.dupe(u8, line);
+    }
+
+    const janet_src = if (found) |b|
+        try substitute_args(allocator, b.janet_expr, parsed.args)
+    else
+        try allocator.dupe(u8, line);
     defer allocator.free(janet_src);
 
     const c_src = try allocator.dupeZ(u8, janet_src);
