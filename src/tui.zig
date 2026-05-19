@@ -66,7 +66,7 @@ const BOLD = "\x1b[1m";
 // Write directly to fd=1 (stdout) without going through std.io (which has
 // churned across Zig 0.13→0.16). The TUI is high-frequency stdout — keep
 // it on the libc-direct path that the rest of the codebase uses.
-fn write_str(s: []const u8) void {
+pub fn write_str(s: []const u8) void {
     _ = libc.write(1, s.ptr, s.len);
 }
 
@@ -74,6 +74,19 @@ fn write_cursor(row: usize, col: usize) void {
     var buf: [32]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "\x1b[{d};{d}H", .{ row, col }) catch return;
     write_str(s);
+}
+
+// Buffer-append equivalents used by render() so the caller can diff
+// the rendered frame against the previous one before emitting (damage
+// tracker, closes the v1.3.0 "TUI full-redraw per keystroke" residual).
+fn buf_str(out: *std.ArrayList(u8), allocator: std.mem.Allocator, s: []const u8) void {
+    out.appendSlice(allocator, s) catch {};
+}
+
+fn buf_cursor(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row: usize, col: usize) void {
+    var buf: [32]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "\x1b[{d};{d}H", .{ row, col }) catch return;
+    buf_str(out, allocator, s);
 }
 
 // ─── Terminal dimensions ───────────────────────────────────────────────
@@ -166,8 +179,17 @@ pub fn readKey() Key {
 }
 
 // ─── Render ────────────────────────────────────────────────────────────
+//
+// Renders the entire frame INTO a caller-supplied byte buffer. The TUI
+// loop then either writes the whole buffer to stdout (initial frame /
+// after resize) or diffs against the previous frame and skips emit when
+// nothing changed (damage tracker, closes the v1.3.0 full-redraw
+// residual). Keeping the render in-memory also makes the TUI testable
+// in v0.3.x without a pty fixture.
 
-pub fn render(
+pub fn render_to_buf(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
     buf: ?*const Buffer,
     scroll: usize,
     current_idx: usize,
@@ -175,12 +197,12 @@ pub fn render(
     minibuffer: ?[]const u8,
 ) void {
     const dims = terminalSize();
-    write_str(CLEAR_SCREEN);
+    buf_str(out, allocator, CLEAR_SCREEN);
 
     // Viewport: rows 1..(rows-2), columns 1..cols. Bottom 2 rows are
     // status + minibuffer.
     const viewport_rows: usize = if (dims.rows > 3) dims.rows - 2 else 1;
-    write_cursor(1, 1);
+    buf_cursor(out, allocator, 1, 1);
 
     if (buf) |b| {
         var line_no: usize = 0;
@@ -192,15 +214,15 @@ pub fn render(
                 if (line_no >= scroll and rendered < viewport_rows) {
                     var prefix_buf: [16]u8 = undefined;
                     const prefix = std.fmt.bufPrint(&prefix_buf, "{d:>4}  ", .{line_no + 1}) catch "  ?  ";
-                    write_str(DIM);
-                    write_str(prefix);
-                    write_str(RESET);
+                    buf_str(out, allocator, DIM);
+                    buf_str(out, allocator, prefix);
+                    buf_str(out, allocator, RESET);
                     const line_end = i;
                     const line_text = b.contents[line_start..line_end];
                     const max_cols: usize = if (dims.cols > 8) @intCast(dims.cols - 8) else 0;
                     const visible_len = @min(line_text.len, max_cols);
-                    write_str(line_text[0..visible_len]);
-                    write_str("\r\n");
+                    buf_str(out, allocator, line_text[0..visible_len]);
+                    buf_str(out, allocator, "\r\n");
                     rendered += 1;
                 }
                 line_no += 1;
@@ -211,32 +233,32 @@ pub fn render(
         if (line_start < b.contents.len and line_no >= scroll and rendered < viewport_rows) {
             var prefix_buf: [16]u8 = undefined;
             const prefix = std.fmt.bufPrint(&prefix_buf, "{d:>4}  ", .{line_no + 1}) catch "  ?  ";
-            write_str(DIM);
-            write_str(prefix);
-            write_str(RESET);
-            write_str(b.contents[line_start..]);
-            write_str("\r\n");
+            buf_str(out, allocator, DIM);
+            buf_str(out, allocator, prefix);
+            buf_str(out, allocator, RESET);
+            buf_str(out, allocator, b.contents[line_start..]);
+            buf_str(out, allocator, "\r\n");
             rendered += 1;
         }
         // Pad short buffers
         while (rendered < viewport_rows) : (rendered += 1) {
-            write_str(DIM);
-            write_str("   ~\r\n");
-            write_str(RESET);
+            buf_str(out, allocator, DIM);
+            buf_str(out, allocator, "   ~\r\n");
+            buf_str(out, allocator, RESET);
         }
     } else {
         var rendered: usize = 0;
         while (rendered < viewport_rows) : (rendered += 1) {
-            write_str(DIM);
-            write_str("   (no buffer open)\r\n");
-            write_str(RESET);
+            buf_str(out, allocator, DIM);
+            buf_str(out, allocator, "   (no buffer open)\r\n");
+            buf_str(out, allocator, RESET);
         }
     }
 
     // Status line
-    write_cursor(viewport_rows + 1, 1);
-    write_str(CLEAR_LINE);
-    write_str(REVERSE);
+    buf_cursor(out, allocator, viewport_rows + 1, 1);
+    buf_str(out, allocator, CLEAR_LINE);
+    buf_str(out, allocator, REVERSE);
     var status_buf: [256]u8 = undefined;
     const kind_label = if (buf) |b| @tagName(b.kind) else "none";
     const buf_name = if (buf) |b| b.name else "—";
@@ -247,27 +269,81 @@ pub fn render(
         .{ current_idx, total_buffers, kind_label, buf_name, dirty_mark, buf_size, scroll },
     ) catch " mast ";
     const status_visible_len = @min(status.len, dims.cols);
-    write_str(status[0..status_visible_len]);
+    buf_str(out, allocator, status[0..status_visible_len]);
     // Pad to full width so REVERSE highlights the whole bar.
     var pad: usize = if (dims.cols > status_visible_len) dims.cols - status_visible_len else 0;
-    while (pad > 0) : (pad -= 1) write_str(" ");
-    write_str(RESET);
+    while (pad > 0) : (pad -= 1) buf_str(out, allocator, " ");
+    buf_str(out, allocator, RESET);
 
     // Minibuffer (M-x line)
-    write_cursor(viewport_rows + 2, 1);
-    write_str(CLEAR_LINE);
+    buf_cursor(out, allocator, viewport_rows + 2, 1);
+    buf_str(out, allocator, CLEAR_LINE);
     if (minibuffer) |mb| {
-        write_str("M-x ");
-        write_str(mb);
-        write_str("_");
+        buf_str(out, allocator, "M-x ");
+        buf_str(out, allocator, mb);
+        buf_str(out, allocator, "_");
     } else {
-        write_str(DIM);
-        write_str("(press : for M-x command)");
-        write_str(RESET);
+        buf_str(out, allocator, DIM);
+        buf_str(out, allocator, "(press : for M-x command)");
+        buf_str(out, allocator, RESET);
     }
 
     // Park the cursor at the minibuffer position so the user can see input.
-    write_cursor(viewport_rows + 2, if (minibuffer) |mb| 5 + mb.len else 1);
+    buf_cursor(out, allocator, viewport_rows + 2, if (minibuffer) |mb| 5 + mb.len else 1);
+}
+
+/// Back-compat wrapper for callers that want immediate stdout emission
+/// (no damage tracking). The TUI loop in main.zig uses `render_to_buf`
+/// + `emit_with_damage` directly.
+pub fn render(
+    buf: ?*const Buffer,
+    scroll: usize,
+    current_idx: usize,
+    total_buffers: usize,
+    minibuffer: ?[]const u8,
+) void {
+    const allocator = std.heap.c_allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    render_to_buf(&out, allocator, buf, scroll, current_idx, total_buffers, minibuffer);
+    write_str(out.items);
+}
+
+/// Frame state for damage-tracker emission.
+pub const FrameState = struct {
+    last: std.ArrayList(u8) = .empty,
+    full_redraw: bool = true,
+
+    pub fn deinit(self: *FrameState, allocator: std.mem.Allocator) void {
+        self.last.deinit(allocator);
+    }
+};
+
+/// Diff-emit: write `current` to stdout iff it differs from `state.last`
+/// (or the state demands a full redraw). Updates `state.last` to the
+/// emitted bytes. Returns true if bytes were written, false if frame
+/// was unchanged.
+pub fn emit_with_damage(
+    state: *FrameState,
+    allocator: std.mem.Allocator,
+    current: []const u8,
+) bool {
+    if (!state.full_redraw and std.mem.eql(u8, current, state.last.items)) {
+        return false;
+    }
+    write_str(current);
+    state.last.clearRetainingCapacity();
+    state.last.appendSlice(allocator, current) catch {};
+    state.full_redraw = false;
+    return true;
+}
+
+/// Force the next emit_with_damage to write regardless of diff. Used
+/// after window resize, after exiting/entering alt-screen, after any
+/// out-of-band write to stdout that would invalidate the screen
+/// representation we cached in state.last.
+pub fn invalidate(state: *FrameState) void {
+    state.full_redraw = true;
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────
@@ -282,4 +358,51 @@ test "tui module compiles and basic ANSI constants are non-empty" {
     try std.testing.expect(ALT_SCREEN_ON.len > 0);
     try std.testing.expect(ALT_SCREEN_OFF.len > 0);
     try std.testing.expect(CLEAR_SCREEN.len > 0);
+}
+
+test "render_to_buf produces deterministic output for the empty-buffer case" {
+    const allocator = std.testing.allocator;
+    var out1: std.ArrayList(u8) = .empty;
+    defer out1.deinit(allocator);
+    var out2: std.ArrayList(u8) = .empty;
+    defer out2.deinit(allocator);
+
+    // Two renders of identical state must produce byte-identical output.
+    render_to_buf(&out1, allocator, null, 0, 0, 0, null);
+    render_to_buf(&out2, allocator, null, 0, 0, 0, null);
+    try std.testing.expectEqualSlices(u8, out1.items, out2.items);
+    try std.testing.expect(out1.items.len > 0);
+}
+
+test "FrameState damage tracker skips emit when frame is unchanged" {
+    const allocator = std.testing.allocator;
+    var state = FrameState{};
+    defer state.deinit(allocator);
+
+    // Capture render output to a buffer (not stdout).
+    var frame_a: std.ArrayList(u8) = .empty;
+    defer frame_a.deinit(allocator);
+    render_to_buf(&frame_a, allocator, null, 0, 0, 0, null);
+
+    // The first emit is always a full redraw (state.full_redraw = true).
+    const first = emit_with_damage(&state, allocator, frame_a.items);
+    try std.testing.expect(first);
+    try std.testing.expectEqualSlices(u8, frame_a.items, state.last.items);
+
+    // The second emit with identical frame bytes must skip (no write).
+    const second = emit_with_damage(&state, allocator, frame_a.items);
+    try std.testing.expect(!second);
+
+    // After invalidate(), the next emit must fire regardless of diff.
+    invalidate(&state);
+    const third = emit_with_damage(&state, allocator, frame_a.items);
+    try std.testing.expect(third);
+
+    // A different frame must trigger emit even without invalidate.
+    var frame_b: std.ArrayList(u8) = .empty;
+    defer frame_b.deinit(allocator);
+    render_to_buf(&frame_b, allocator, null, 5, 0, 0, null); // different scroll
+    const fourth = emit_with_damage(&state, allocator, frame_b.items);
+    try std.testing.expect(fourth);
+    try std.testing.expectEqualSlices(u8, frame_b.items, state.last.items);
 }
