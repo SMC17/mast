@@ -20,6 +20,7 @@ const std = @import("std");
 const Buffer = @import("buffer.zig").Buffer;
 const SessionAudit = @import("audit.zig").SessionAudit;
 const sandbox = @import("sandbox.zig");
+const tui = @import("tui.zig");
 
 const janet = @import("janet_c.zig").c;
 
@@ -904,11 +905,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var args_iter = init.args.iterate();
     _ = args_iter.next(); // skip argv[0]
 
-    // First positional arg: optional file path to open as :file buffer
+    // CLI flags: --tui enters the windowed view after init.janet loads.
     var initial_file: ?[]const u8 = null;
-    if (args_iter.next()) |a| {
+    var tui_mode = false;
+    while (args_iter.next()) |a| {
         if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
-            print("usage: mast [file]\n\n", .{});
+            print("usage: mast [--tui] [file]\n\n", .{});
             print("{s}", .{HELP_TEXT});
             return;
         }
@@ -916,7 +918,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
             print("mast v1.2.0\n", .{});
             return;
         }
-        initial_file = try allocator.dupe(u8, a);
+        if (std.mem.eql(u8, a, "--tui")) {
+            tui_mode = true;
+            continue;
+        }
+        if (initial_file == null) {
+            initial_file = try allocator.dupe(u8, a);
+        }
     }
     defer if (initial_file) |p| allocator.free(p);
 
@@ -1034,7 +1042,160 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     };
 
-    try run_repl(allocator, env.?, &audit);
+    if (tui_mode) {
+        try run_tui(allocator, env.?, &audit);
+    } else {
+        try run_repl(allocator, env.?, &audit);
+    }
+}
+
+// ─── TUI run loop ──────────────────────────────────────────────────────
+//
+// Enters raw mode, draws the viewport, reads keys, dispatches to the
+// existing M-x machinery via janet_dostring. The render is full-redraw
+// per keystroke — adequate for a v0.3 prototype on terminals smaller
+// than 200x80. v0.3.x will add diff-render via a damage tracker.
+//
+// Key dispatch:
+//   j / Down  → scroll down
+//   k / Up    → scroll up
+//   g         → top of buffer (scroll = 0)
+//   G         → bottom of buffer (scroll = lineCount - viewport_rows)
+//   n         → next buffer (cycles g_current_index forward)
+//   p         → prev buffer
+//   :         → read a M-x command into the minibuffer, execute on Enter
+//   q         → exit TUI back to caller
+//   Ctrl-C    → exit TUI
+
+fn run_tui(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) !void {
+    var raw = tui.RawMode.enter();
+    defer raw.exit();
+
+    try audit.write("tui-enter", .{});
+    defer audit.write("tui-exit", .{}) catch {};
+
+    var scroll: usize = 0;
+    var minibuffer_buf: [256]u8 = undefined;
+    var minibuffer_len: usize = 0;
+    var in_mx_mode = false;
+
+    while (true) {
+        const cur = currentBuffer();
+        const total = g_buffers.items.len;
+        const minibuffer_slice: ?[]const u8 = if (in_mx_mode) minibuffer_buf[0..minibuffer_len] else null;
+        tui.render(cur, scroll, g_current_index, total, minibuffer_slice);
+
+        const k = tui.readKey();
+        const k_int = @intFromEnum(k);
+
+        if (in_mx_mode) {
+            // Minibuffer input loop
+            if (k_int == 0x0a or k_int == 0x0d) {
+                // Enter — execute the line
+                const cmd_line = minibuffer_buf[0..minibuffer_len];
+                if (cmd_line.len > 0) {
+                    try execute_mx_line(allocator, env, audit, cmd_line);
+                }
+                minibuffer_len = 0;
+                in_mx_mode = false;
+                continue;
+            }
+            if (k_int == 0x1b) {
+                // ESC — cancel minibuffer
+                minibuffer_len = 0;
+                in_mx_mode = false;
+                continue;
+            }
+            if (k_int == 0x7f or k_int == 0x08) {
+                // Backspace
+                if (minibuffer_len > 0) minibuffer_len -= 1;
+                continue;
+            }
+            if (k_int >= 0x20 and k_int < 0x7f and minibuffer_len < minibuffer_buf.len) {
+                minibuffer_buf[minibuffer_len] = @intCast(k_int);
+                minibuffer_len += 1;
+            }
+            continue;
+        }
+
+        // Navigation mode
+        switch (k_int) {
+            'q', 0x03 => break, // q or Ctrl-C
+            'j' => scroll += 1,
+            'k' => if (scroll > 0) {
+                scroll -= 1;
+            },
+            'g' => scroll = 0,
+            'G' => {
+                if (cur) |b| {
+                    const dims = tui.terminalSize();
+                    const viewport: usize = if (dims.rows > 3) dims.rows - 2 else 1;
+                    const lines = b.lineCount();
+                    scroll = if (lines > viewport) lines - viewport else 0;
+                }
+            },
+            'n' => {
+                _ = nextBuffer();
+                scroll = 0;
+            },
+            'p' => {
+                _ = prevBuffer();
+                scroll = 0;
+            },
+            ':' => in_mx_mode = true,
+            else => {
+                // Arrow keys
+                if (k == .down) scroll += 1;
+                if (k == .up and scroll > 0) scroll -= 1;
+            },
+        }
+    }
+}
+
+/// Shared M-x dispatch used by both the line REPL and the TUI minibuffer.
+/// Routes through parse_mx_line, the builtin table, and falls through to
+/// raw Janet eval. The TUI variant suppresses the print() side-effects
+/// the REPL emits; results are visible on the next full-redraw.
+fn execute_mx_line(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit, line: []const u8) !void {
+    const parsed = (try parse_mx_line(allocator, line)) orelse return;
+    defer allocator.free(parsed.args);
+    try audit.write("mx-input", .{ .verb = parsed.verb });
+
+    if (std.mem.eql(u8, parsed.verb, "exit") or std.mem.eql(u8, parsed.verb, "quit")) {
+        return; // TUI loop will exit when q is pressed; ignore here
+    }
+
+    var found: ?BuiltinCmd = null;
+    for (BUILTINS) |b| {
+        if (std.mem.eql(u8, b.name, parsed.verb)) {
+            found = b;
+            break;
+        }
+    }
+
+    // For the TUI prototype, sentinel verbs (display/save/etc) are handled
+    // by the existing REPL render path or by direct buffer ops — for the
+    // first pass we route only Janet-expressible builtins + raw eval. The
+    // user can still reach M-x save / append etc. by issuing them from the
+    // line REPL session; the TUI is the "view + agent driver" surface.
+    const janet_src = if (found) |b| blk: {
+        if (std.mem.startsWith(u8, b.janet_expr, "MAST_")) {
+            // Sentinel verb — punt for v0.3 TUI prototype. The line REPL
+            // remains the place to drive these.
+            try audit.write("tui-sentinel-skipped", .{ .verb = parsed.verb });
+            return;
+        }
+        break :blk try substitute_args(allocator, b.janet_expr, parsed.args);
+    } else try allocator.dupe(u8, line);
+    defer allocator.free(janet_src);
+
+    const c_src = try allocator.dupeZ(u8, janet_src);
+    defer allocator.free(c_src);
+    var out: janet.Janet = undefined;
+    const status = janet.janet_dostring(env, c_src.ptr, "tui-mx", &out);
+    if (status != 0) {
+        try audit.write("mx-error", .{ .verb = parsed.verb, .status = status });
+    }
 }
 
 fn load_init_janet(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) !void {
