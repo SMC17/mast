@@ -6,6 +6,43 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.3.x — residual closures + tooling (2026-05-19)
+
+Four residuals named in the v1.3.0 release notes closed in a single round:
+
+- **Residual #9 — sandbox-deny audit routing.** `sandbox.DenyCategory`
+  enum + `sandbox.g_deny_observer` callback. Every panic stub (and the
+  two exec-gated wrappers) call `observe(category)` BEFORE `janet_panicf`,
+  so even unrecoverable denies leave a trace in `SessionAudit` as
+  `sandbox-deny` records before Janet's stacktrace hits stderr. One new
+  in-source test exercises 5 categories from a single VM.
+- **Residual #8 — `agent/wait` poll(2).** Replaced 10ms `usleep` loop
+  with `poll(2)` on stdout_fd + 500ms backstop timeout. Lower CPU under
+  many concurrent agents, faster wake on bursty output.
+- **Residual #10 — host-cfunction regression discipline.**
+  `tools/cfunction-audit.sh` enumerates every `janet_def`-registered
+  cfunction and FAILS if any touches `libc.system`/`popen`/`exec`/`fork`
+  without consulting the capability set. Wired into `zig build test`.
+  Initial scan: 15 cfunctions, 3 gated, 12 benign, 0 violations.
+- **TUI minibuffer sentinel handling** (deferred from v0.3 prototype).
+  `execute_mx_line()` now handles `MAST_APPEND_SENTINEL`,
+  `MAST_SAVE_SENTINEL`, `MAST_SAVEAS_SENTINEL`, `MAST_NEWBUFFER_SENTINEL`
+  directly. Display-only sentinels (help/display/list-buffers) skipped
+  because the TUI renders that state inline.
+
+Documentation drift discipline also strengthened: `tools/doctest.sh`
+extended from 13 → 25 checks covering the multi-buffer ring lifecycle,
+agent/run + agent/spawn + agent/wait + agent/alive? cycles, the `--tui`
+launch + alt-screen entry, and the G2 panic message observability from
+user-script context.
+
+Mutation-test re-run after the v1.3.x extensions: 8/10 killed, 80% score
+unchanged. No new survivors emerged from the new code.
+
+Tests: **22/22 in-source** + 5/5 strict-mode integration + 25/25 doctest
++ 0 cfunction-audit violations + 8/10 mutation killed (2 documented
+equivalent mutants).
+
 ### In-house ANSI TUI behind --tui — 2026-05-19 (v0.3)
 
 `src/tui.zig` ships a minimal windowed view that runs in the alt-screen
