@@ -1,9 +1,22 @@
 # mast — Sandbox Threat Model & Capability Vocabulary
 
-Status: 2026-05-14. Proof level: **audited** (this document) + **unit-tested**
-(the one currently-gated binding, `os/shell` + `stax-bash`) +
+Status: 2026-05-19. Proof level: **audited** (this document) + **unit-tested**
+(the gated bindings `os/shell` + `stax-bash`, plus every removed binding
+in the static `REMOVED_BINDINGS` list — see §5) +
 **posture-observable-end-to-end** in the production binary under
 `MAST_SANDBOX_STRICT=1` (see §5 `MAST_SANDBOX_STRICT`).
+
+**G2 closure 2026-05-19.** The "residual ungated Janet surface" the
+original document called out — `os/execute`, `os/spawn`, `file/*`,
+`net/*`, `native`, `unmarshal`, `os/exit` — is now closed via the
+"removed from the embedded env" path this document already named as
+valid (§6, prior wording). Each of those symbols still resolves
+(Janet's compile-time symbol resolution still works), but invoking
+them panics with a documented message that names the symbol and
+points back here. The closure is iterated against a single static
+list (`src/sandbox.zig::REMOVED_BINDINGS`), and the load-bearing
+test (`G2 closure: every REMOVED_BINDINGS entry panics from Janet`)
+walks the same list — adding to one without the other trips CI.
 
 This document IS the audit. The persona is the assistant working as a senior
 systems / security engineer; no external review claimed. Self-applied,
@@ -29,11 +42,16 @@ evaluation.
 
 **This document is NOT:**
 
-- A claim that mast is sandboxed. It is not. v1 ships a *first slice* of
-  a capability model — one (1) Janet stdlib binding is wrapped, plus the
-  host-bound `stax-bash` cfunction. The other dangerous Janet stdlib
-  bindings (file/, net/, os/exit, os/execute, os/spawn, native, etc.)
-  are NOT wrapped in v1.
+- A claim that mast is sandboxed in the OS-isolation sense. It is not.
+  v0.2 ships a capability model where one (1) Janet stdlib binding
+  (`os/shell`) plus the host-bound `stax-bash` are GATED on `exec`,
+  AND the rest of the original residual surface (`os/execute`,
+  `os/spawn`, `os/posix-fork`, `os/posix-exec`, `file/open`,
+  `file/temp`, `slurp`, `spit`, `dofile`, `net/connect`, `net/listen`,
+  `net/accept`, `net/accept-loop`, `native`, `unmarshal`, `os/exit`)
+  is REMOVED from the embedded env via panic stubs. This is not a
+  process-level sandbox — it is a Janet-script-level capability model
+  whose mediation point is the C-binding boundary.
 - A guarantee against in-process exploitation. Janet runs in the same
   address space as mast and shares the libc heap; a Janet-side
   type-confusion or buffer-overrun in Janet itself bypasses every gate
@@ -96,19 +114,19 @@ The set of capabilities enumerated in `src/sandbox.zig` is the
 type-level commitment. Adding a new capability is a deliberate design
 act, not an emergent feature.
 
-| Capability        | Gates (intended)                                                                 | Gated today |
-|-------------------|----------------------------------------------------------------------------------|-------------|
-| `exec`            | `os/execute`, `os/spawn`, `os/shell`, `os/posix-fork`, `os/posix-exec`, `stax-bash` | `os/shell` + `stax-bash` only |
-| `fs_read`         | `file/open` (r-mode), `slurp`, `os/stat`, `os/lstat`, `os/dir`, `os/readlink`, `dofile`, `os/realpath` | none |
-| `fs_write`        | `file/open` (w-mode), `spit`, `os/mkdir`, `os/rmdir`, `os/rm`, `os/rename`, `os/touch`, `os/symlink`, `os/link`, `os/chmod` | none |
-| `net_connect`     | `net/connect`                                                                    | none |
-| `net_listen`      | `net/listen`, `net/accept`, `net/accept-loop`                                    | none |
-| `env_read`        | `os/getenv`, `os/environ`                                                        | none |
-| `env_write`       | `os/setenv`                                                                      | none |
-| `dynamic_modules` | `native`, `import`-of-native, `module/load`-of-shared-object                     | none |
-| `ffi`             | `ffi/native`, `ffi/lookup`, `ffi/signature`, `ffi/jitfn`                         | none |
-| `unmarshal`       | `unmarshal`                                                                      | none |
-| `process_exit`    | `os/exit`                                                                        | none |
+| Capability        | Gates (intended)                                                                 | Status (post-G2, 2026-05-19) |
+|-------------------|----------------------------------------------------------------------------------|------------------------------|
+| `exec`            | `os/execute`, `os/spawn`, `os/shell`, `os/posix-fork`, `os/posix-exec`, `stax-bash` | `os/shell` + `stax-bash` GATED on `exec`; `os/execute`, `os/spawn`, `os/posix-fork`, `os/posix-exec` REMOVED from env (narrowed surface) |
+| `fs_read`         | `file/open` (r-mode), `slurp`, `os/stat`, `os/lstat`, `os/dir`, `os/readlink`, `dofile`, `os/realpath` | `file/open`, `slurp`, `file/temp`, `dofile` REMOVED; ancillary `os/stat`/`os/dir`/`os/readlink`/`os/realpath` still present (read-only metadata, lower blast; v0.3 work) |
+| `fs_write`        | `file/open` (w-mode), `spit`, `os/mkdir`, `os/rmdir`, `os/rm`, `os/rename`, `os/touch`, `os/symlink`, `os/link`, `os/chmod` | `file/open` and `spit` REMOVED; ancillary `os/*` filesystem mutators still present (v0.3 work) |
+| `net_connect`     | `net/connect`                                                                    | `net/connect` REMOVED |
+| `net_listen`      | `net/listen`, `net/accept`, `net/accept-loop`                                    | `net/listen`, `net/accept`, `net/accept-loop` REMOVED |
+| `env_read`        | `os/getenv`, `os/environ`                                                        | none (out of original G2 scope; tracked as v0.3 residual) |
+| `env_write`       | `os/setenv`                                                                      | none (out of original G2 scope) |
+| `dynamic_modules` | `native`, `import`-of-native, `module/load`-of-shared-object                     | `native` REMOVED (which also blocks `import` / `module/load` of `.so` since both resolve through `native`); `.janet`-path `import` is blocked transitively because `slurp` is removed |
+| `ffi`             | `ffi/native`, `ffi/lookup`, `ffi/signature`, `ffi/jitfn`                         | none today; the vendored Janet build does not compile in JANET_EV-style FFI, so this row is largely theoretical — re-audit when the build config changes |
+| `unmarshal`       | `unmarshal`                                                                      | `unmarshal` REMOVED |
+| `process_exit`    | `os/exit`                                                                        | `os/exit` REMOVED |
 
 **Default: every capability denied.** The host explicitly grants
 capabilities by calling `sandbox.grant(cap)`. There is no Janet-facing
@@ -169,9 +187,12 @@ Listed in declining order of blast radius.
 
 ---
 
-## 5. What v1 enforces (the worked example)
+## 5. What v0.2 enforces
 
-`src/sandbox.zig::applyDefaultDeny` does ONE replacement:
+### 5.1 Gated path (`os/shell` + `stax-bash`)
+
+`src/sandbox.zig::applyDefaultDeny` does ONE capability-gated
+replacement:
 
 ```
 env["os/shell"] = gated_os_shell
@@ -186,19 +207,53 @@ which are nanboxing-dependent and not @cImport-friendly).
 `sandbox.gated_stax_bash` (which performs the identical cap check) so
 the parallel host-bound shell-out path respects the same posture.
 
-Two tests in `src/sandbox.zig`:
+### 5.2 Removed-from-env path (G2 closure, 2026-05-19)
 
-- `"default-deny: os/shell panics when exec capability is absent"` —
-  stands up a fresh Janet VM, applies the default-deny, evaluates
-  `(os/shell "true")`, asserts `janet_dostring` returned non-zero
-  status (i.e. Janet's panic propagated).
-- `"grant: os/shell succeeds when exec capability is granted"` — same
-  setup, but grants `Capability.exec` before evaluating, asserts
-  status == 0.
+`applyDefaultDeny` ALSO iterates the static `REMOVED_BINDINGS` list
+and replaces each named symbol with a panic stub categorized by
+removal reason (subprocess / file-io / net / native / unmarshal /
+exit / dofile). The threat-model-§6-prior-wording explicitly named
+"removed from the embedded env" as a valid closure path for these.
+v0.2 takes it. The full list, as of 2026-05-19:
 
-Both pass on Linux x86_64 as of 2026-05-14. They are wired into
-`zig build test` as a second test target with the full Janet runtime
-linked in.
+```
+Subprocess (narrowed to os/shell + stax-bash):
+  os/execute, os/spawn, os/posix-fork, os/posix-exec
+File I/O (host buffer ops are the v0.2 interface):
+  file/open, file/temp, slurp, spit, dofile
+Network (host-bound HTTP allowlist deferred to v0.3):
+  net/connect, net/listen, net/accept, net/accept-loop
+RCE primitives (no granted path in v0.2):
+  native, unmarshal
+Host lifecycle:
+  os/exit
+```
+
+Each panic stub names the symbol and points back at this document.
+
+### 5.3 Tests
+
+Eight in-source tests in `src/sandbox.zig`:
+
+- `"default-deny: os/shell panics when exec capability is absent"`
+- `"grant: os/shell succeeds when exec capability is granted"`
+- `"gated_stax_bash: argc=1 succeeds; argc=0 / argc=2 panic (kills mutant M04)"`
+- `"capability set: grant / has / revokeAll behave correctly"`
+- `"eqAsciiCI handles every A-Z boundary (caught by mutation testing 2026-05-14)"`
+- `"MAST_SANDBOX_STRICT env parsing: truthy / falsy / case-insensitive"`
+- **`"G2 closure: every REMOVED_BINDINGS entry panics from Janet"`** —
+  the load-bearing G2 test. Stands up a fresh Janet VM, applies the
+  default-deny, GRANTS EVERY CAPABILITY (so a regression that
+  accidentally re-routes removed bindings through a cap check would
+  show up as a non-panic), then invokes every entry in the static
+  `REMOVED_BINDINGS` list from Janet and asserts each one panics.
+  Iterates the same list `applyDefaultDeny` uses, so the install
+  path and the test can never drift.
+- **`"G2 closure: applyDefaultDeny returns the expected number of replacements"`** —
+  catches a silent-drift mutant where the install loop early-returns
+  or skips entries.
+
+All pass on Linux x86_64 as of 2026-05-19; wired into `zig build test`.
 
 ### v1 host policy
 
@@ -252,50 +307,74 @@ Parser semantics (`src/sandbox.zig::strictModeFromEnv`):
 
 ---
 
-## 6. What v1 does NOT defend against — explicit residual gaps
+## 6. What v0.2 does NOT defend against — explicit residual gaps
 
 A senior reviewer will flag every one of these. We name them rather
-than hide them.
+than hide them. **Items #1–5 of the prior version are CLOSED by G2
+(2026-05-19); the strikethroughs are kept for changelog continuity.**
 
-1. **Unwrapped subprocess primitives.** `os/execute`, `os/spawn`,
-   `os/posix-fork`, `os/posix-exec` remain bare. A script can execute
-   arbitrary commands by typing `(os/execute ["/bin/sh" "-c" "..."] :p)`
-   and the gate on `os/shell` is silently bypassed. Fixing this is the
-   single highest-leverage next move and is intentionally scoped to v2.
-2. **No file/ or net/ gating.** Every filesystem and network binding is
-   available unmediated. A script can `slurp` any readable file and
-   `(net/connect ...)` anywhere.
-3. **No `native` or `import` gating.** A script can load a shared library
-   that bypasses every gate. v2 will gate `dynamic_modules`.
-4. **No `unmarshal` gating.** Marshal blobs can carry bytecode. v2.
-5. **No `os/exit` gating.** A script can terminate the host. v2.
+1. ~~**Unwrapped subprocess primitives.** `os/execute`, `os/spawn`,
+   `os/posix-fork`, `os/posix-exec` remain bare.~~ **CLOSED 2026-05-19:**
+   all four are removed from the embedded env via panic stubs. Subprocess
+   surface is narrowed to `os/shell` + `stax-bash`, both gated on `exec`.
+2. ~~**No file/ or net/ gating.**~~ **CLOSED 2026-05-19:** `file/open`,
+   `file/temp`, `slurp`, `spit`, `dofile`, `net/connect`, `net/listen`,
+   `net/accept`, `net/accept-loop` removed via panic stubs. *Ancillary*
+   `os/*` filesystem metadata bindings (`os/stat`, `os/dir`, `os/mkdir`,
+   `os/rm`, `os/rename`, etc.) remain present — they have lower blast
+   radius than the I/O primitives and are deferred to v0.3 path-prefix
+   capabilities work.
+3. ~~**No `native` or `import` gating.**~~ **CLOSED 2026-05-19:** `native`
+   removed via panic stub. `import` and `module/load` resolve through
+   `native` for `.so` modules, so the `.so` path is blocked transitively.
+   The `.janet`-source path of `import`/`module/load` is blocked
+   transitively because `slurp` is removed (the loader can't read the file).
+4. ~~**No `unmarshal` gating.**~~ **CLOSED 2026-05-19:** `unmarshal`
+   removed via panic stub. Marshal blobs cannot be deserialized from
+   Janet in v0.2 at all.
+5. ~~**No `os/exit` gating.**~~ **CLOSED 2026-05-19:** `os/exit` removed
+   via panic stub. Host controls process lifecycle.
+
+**Residual gaps still present in v0.2:**
+
 6. **No environment-variable gating.** `(os/getenv "AWS_SECRET_ACCESS_KEY")`
-   succeeds today. v2.
-7. **No resource quotas.** A pathological Janet script can spin a tight
+   succeeds today. NOT in the original G2 scope; tracked for v0.3 with
+   `env_read` / `env_write` capability gates against the existing
+   capability vocabulary.
+7. **Ancillary filesystem-metadata bindings.** `os/stat`, `os/lstat`,
+   `os/dir`, `os/realpath`, `os/readlink`, `os/mkdir`, `os/rmdir`,
+   `os/rm`, `os/rename`, `os/touch`, `os/symlink`, `os/chmod`. These
+   give partial filesystem visibility / mutation without going through
+   the primary read/write path. Lower blast than file/open + slurp/spit
+   (no content read or large write), but a script can still enumerate
+   the user's home directory or `chmod 777` a file. v0.3.
+8. **No resource quotas.** A pathological Janet script can spin a tight
    `(while true)` loop, fill the heap with a `(repeat 1e9 ...)`, or open
-   thousands of fds. v3 territory; requires a Janet fiber-level interrupt
-   primitive we have not designed yet.
-8. **No audit-log routing of deny events.** Today's gated wrapper
-   `janet_panicf`s on deny; the panic message goes through Janet's normal
-   stacktrace path to stderr. It does NOT route through `SessionAudit`.
-   v2 will add a `sandbox-deny` event-type to the audit log.
-9. **No defense against host-side `cfunction` regression.** Any new
-   `janet_def`-registered cfunction in `main.zig` that calls a dangerous
-   syscall WITHOUT consulting `g_sandbox` re-opens the gap. The
-   convention is documented in `sandbox.zig` (see `gated_stax_bash`
-   pattern), but it is convention, not a compile-time check. A static
-   audit pass over `janet_def` registrations is a v1.5 follow-up.
-10. **No defense against Janet itself.** A Janet runtime bug
+   thousands of fds. v0.3+ territory; requires a Janet fiber-level
+   interrupt primitive we have not designed yet.
+9. **No audit-log routing of deny / removed-binding events.** Today's
+   gated wrapper and the removed-binding panic stubs `janet_panicf` on
+   trigger; the panic message goes through Janet's normal stacktrace
+   path to stderr. It does NOT route through `SessionAudit`. v0.3 will
+   add a `sandbox-deny` event-type to the audit log so denials are
+   queryable from the session log.
+10. **No defense against host-side `cfunction` regression.** Any new
+    `janet_def`-registered cfunction in `main.zig` that calls a dangerous
+    syscall WITHOUT consulting `g_sandbox` re-opens the gap. The
+    convention is documented in `sandbox.zig` (see `gated_stax_bash`
+    pattern), but it is convention, not a compile-time check. A static
+    audit pass over `janet_def` registrations is a v0.3 follow-up.
+11. **No defense against Janet itself.** A Janet runtime bug
     (out-of-bounds read, type confusion in `unmarshal`) gives an attacker
     everything. Tracking Janet upstream security advisories is operational
-    discipline, not engineering work.
-11. **No defense against host-process privilege.** mast runs as the user.
+    discipline, not engineering work. (Note: `unmarshal` is removed, but
+    Janet's marshal-format parser is still compiled in.)
+12. **No defense against host-process privilege.** mast runs as the user.
     If the user is root, every gate above is moot — root can also bypass
     `chmod` permissions on the user's own files. Run mast unprivileged.
-12. **Single-process grant scoping.** Today `sandbox.grant` is
+13. **Single-process grant scoping.** Today `sandbox.grant` is
     process-global. Two separate Janet environments in the same process
-    share the same capability set. v2 keys the set off the
-    `JanetTable*`.
+    share the same capability set. v2 keys the set off the `JanetTable*`.
 
 ---
 
@@ -368,9 +447,24 @@ The unit test in `src/sandbox.zig` exercises exactly this path. CI
 status is the public falsification check.
 
 Falsification of the stronger claim that *"a Janet script in mast cannot
-run an external command without `exec`"* is currently TRIVIAL: substitute
-`os/execute` or `os/spawn` for `os/shell`. **That is the v2 gap.** Today
-this document does NOT make the stronger claim.
+run an external command without `exec`"* — previously trivial via
+`(os/execute ...)` — is now closed by the G2 removal. The
+`G2 closure: every REMOVED_BINDINGS entry panics from Janet` test
+exercises `(os/execute ...)`, `(os/spawn ...)`, `(os/posix-fork ...)`,
+`(os/posix-exec ...)` directly and asserts each panics under
+default-deny AND under all-caps-granted. The stronger falsification
+target for v0.2 is:
+
+```janet
+# In a fresh mast session with sandbox.revokeAll() called:
+(slurp "/etc/shadow")           # MUST panic with file-I/O removed-stub
+(net/connect "evil.example" 80)  # MUST panic with network removed-stub
+(unmarshal @"\xff\xff")          # MUST panic with unmarshal removed-stub
+(os/exit 1)                      # MUST panic with os/exit removed-stub
+```
+
+If any of those returns a value instead of triggering Janet's panic,
+the claim is false. The G2 closure test exercises each one.
 
 ---
 

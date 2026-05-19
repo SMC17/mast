@@ -1,6 +1,6 @@
 # mast status
 
-Last touched: 2026-05-15
+Last touched: 2026-05-19
 
 ## Honest version posture
 
@@ -29,7 +29,7 @@ substrate until both gates above close.
 
 | component                                | proof level                                       | evidence                                                                                                                                                       |
 |------------------------------------------|---------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Sandbox capability model (`os/shell` + `stax-bash`) | `audited` + `unit-tested`                          | `docs/SANDBOX_THREAT_MODEL.md` is the self-applied audit; `src/sandbox.zig` ships 6 in-source tests covering deny + grant + argc-bounds + ASCII-CI compare      |
+| Sandbox capability model (`os/shell` + `stax-bash` gated; G2 residuals removed) | `audited` + `unit-tested`                          | `docs/SANDBOX_THREAT_MODEL.md` is the self-applied audit; `src/sandbox.zig` ships 8 in-source tests covering deny + grant + argc-bounds + ASCII-CI compare + every removed-binding panics from Janet (drift-proof against the static `REMOVED_BINDINGS` list) |
 | Sandbox mechanism — capability check     | `audited` (mutation-proven)                       | `tools/mutation-test.sh` M01 — the `g_sandbox.has(.exec)` sense flip — is KILLED; the load-bearing security check is mutation-resistant                       |
 | `MAST_SANDBOX_STRICT` env var            | `posture-observable-end-to-end`                   | `tests/strict_mode_integration.sh` 5/5 cases against the built binary; one in-source env-parser test (`strictModeFromEnv`); README §Security/Sandbox documents |
 | Buffer protocol (`fromBytes` / `append` / `setContents`) | `unit-tested`                                     | 6 in-source tests in `src/buffer.zig` covering round-trip + dirty-flag + saveAs kind-conversion + partial-EOF mock                                              |
@@ -43,15 +43,29 @@ substrate until both gates above close.
 - **G1 — Real Janet script under load.** A non-toy `.janet` user
   config (≥ a few hundred lines) loaded by mast and exercised over
   a meaningful session, ideally driving the editor through buffer
-  mutation + file saves + sandbox-gated calls. Status:
-  `NOT YET CLOSED`.
+  mutation + file saves + sandbox-gated calls. Status: `PARTIALLY
+  CLOSED 2026-05-19`. `~/.config/mast/init.janet` is 207 lines / 25
+  user-script verbs across 7 sections (utility / experiment register
+  / buffer introspection / sandbox-posture probes / fleet workflows
+  / codex / morning-brief), loads cleanly on startup, and the
+  `sandbox-audit` verb returns 8/8 "G2 OK" lines confirming every
+  REMOVED_BINDINGS panic is observable end-to-end from user-script
+  context (not just from in-source Zig tests). Soak time (G3)
+  remains the missing G1 component — "loaded once" is not "exercised
+  over a meaningful session."
 - **G2 — Wrap the residual ungated Janet surface.** The threat model
-  (`docs/SANDBOX_THREAT_MODEL.md` §1) names the surface that v1 does
+  (`docs/SANDBOX_THREAT_MODEL.md` §1) named the surface that v1 did
   NOT gate: `os/execute`, `os/spawn`, `file/*`, `net/*`, `native`,
-  `unmarshal`, `os/exit`. Each is reachable from a Janet script under
-  strict mode today. Until these are wrapped (or removed from the
-  embedded env), the sandbox is a *first slice*, not a complete
-  capability model. Status: `NOT YET CLOSED`.
+  `unmarshal`, `os/exit`. v0.2 closes G2 via the "removed from the
+  embedded env" path the threat model itself names as valid: each of
+  those symbols now resolves to a panic stub that names the symbol and
+  points at the threat model. Subprocess surface is narrowed to
+  `os/shell` + `stax-bash` (both gated on `exec`). The
+  `REMOVED_BINDINGS` static list and the `G2 closure` test iterate the
+  same set, so adding to one without the other will trip CI.
+  Status: `CLOSED 2026-05-19`. Residual env-var bindings (`os/getenv`,
+  `os/setenv`, `os/environ`) are tracked separately — not in the
+  original G2 scope.
 - **G3 — Soak time.** ≥30 days of continuous mast use as the daily
   editor for at least one real workflow (driving real-stax-CLI
   invocations, holding real buffers under real edits), with the
@@ -65,8 +79,11 @@ substrate until both gates above close.
   makes the v1.x tag mean what it says in any other ecosystem.
   Status: `NOT YET CLOSED` (out of this repo's control).
 
-Only after G5 + at least one of G1 / G2 / G3 / G4 do the words
-"production-grade" or "stable v1" honestly fit. Until then, mast
-ships as a pre-1.0 substrate with mutation-proven mechanism on the
-one binding it wraps, an observable strict-mode posture, and an
-explicit list of residual gaps.
+Only after G5 + at least one of G1 / G3 / G4 do the words
+"production-grade" or "stable v1" honestly fit (G2 alone is not
+sufficient — sandbox completeness is a necessary condition for
+the substrate's security claim, not for the version claim). Until
+then, mast ships as a pre-1.0 substrate with mutation-proven
+mechanism on the `os/shell` + `stax-bash` gated path, every other
+dangerous Janet binding removed from the embedded env, an observable
+strict-mode posture, and an explicit list of residual gaps.
