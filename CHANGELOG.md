@@ -6,6 +6,35 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### In-house ANSI TUI behind --tui — 2026-05-19 (v0.3)
+
+`src/tui.zig` ships a minimal windowed view that runs in the alt-screen
+under termios raw mode. Why in-house and not vaxis: mast's build doctrine
+is single-binary, zero external Zig deps (no `build.zig.zon` today).
+Adding vaxis would break the doctrine AND introduce Zig 0.13 → 0.16
+churn we explicitly route around in `buffer.zig` / `sandbox.zig` /
+`main.zig`. ANSI escape codes + libc termios reach 95% of what a v0.3
+view needs without any of that risk. vaxis re-evaluation is a v0.4
+question, post-Zig-1.0.
+
+What the v0.3 TUI does:
+- Alt-screen enter + cursor hide on start; full restore on exit
+- Renders buffer with dim line numbers, reverse-video status line at
+  row N-1, minibuffer line at row N
+- Key dispatch: `j/k` or `Up/Down` scroll; `g/G` top/bottom;
+  `n/p` cycle buffers; `:` enter minibuffer; `q` or Ctrl-C exit
+- Minibuffer routes through the same `execute_mx_line` helper the line
+  REPL uses, so any Janet-expressible verb works in both surfaces.
+  Sentinel verbs (display/save/append/save-as) are deliberately punted
+  to the line REPL for the v0.3 prototype.
+
+Invocation: `mast --tui [file]`. The flag is opt-in; default behavior
+is unchanged. The TUI module is host code outside the Janet trust
+boundary — Janet scripts cannot drive the TUI directly, they can only
+mutate buffers (which the TUI re-renders).
+
+21/21 tests pass (was 20; +1 tui compile-check).
+
 ### agent/spawn async + live-tail — 2026-05-19 (v0.3 of agent-as-buffer)
 
 The synchronous `(agent/run cmd)` shipped earlier today has a non-blocking
