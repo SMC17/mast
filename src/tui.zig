@@ -310,12 +310,38 @@ pub fn render(
 }
 
 /// Frame state for damage-tracker emission.
+///
+/// Two diff granularities live in the same struct:
+///   - frame-level (`last`): the entire rendered frame as one byte slice.
+///     `frame_changed` / `emit_with_damage` use this.
+///   - row-level (`row_last`, `row_lens`): one stored slice per row of
+///     last frame's content. `emit_with_row_damage` uses this to emit
+///     ONLY rows that changed since the last frame — important on large
+///     terminals where the unchanged-row cost dominates.
+///
+/// Both modes share `full_redraw`. After `invalidate(state)` the next
+/// emit (either mode) rewrites the whole screen and re-snapshots.
 pub const FrameState = struct {
     last: std.ArrayList(u8) = .empty,
     full_redraw: bool = true,
 
+    // Row-level snapshot (v1.3.3). Each row is stored as a flat byte slice
+    // including the trailing "\r\n" that render emits, but WITHOUT the
+    // cursor-positioning escape (those are regenerated per emit, so they
+    // don't enter the diff).
+    row_last: [MAX_ROWS]?[]u8 = .{null} ** MAX_ROWS,
+    row_count: usize = 0,
+
+    pub const MAX_ROWS: usize = 256;
+
     pub fn deinit(self: *FrameState, allocator: std.mem.Allocator) void {
         self.last.deinit(allocator);
+        for (&self.row_last) |*row| {
+            if (row.*) |bytes| {
+                allocator.free(bytes);
+                row.* = null;
+            }
+        }
     }
 };
 
@@ -356,12 +382,77 @@ pub fn emit_with_damage(
     return true;
 }
 
-/// Force the next emit_with_damage to write regardless of diff. Used
-/// after window resize, after exiting/entering alt-screen, after any
-/// out-of-band write to stdout that would invalidate the screen
-/// representation we cached in state.last.
+/// Force the next emit (either mode) to rewrite regardless of diff.
+/// Used after window resize, after exiting/entering alt-screen, after
+/// any out-of-band write to stdout that would invalidate the cached
+/// screen representation.
 pub fn invalidate(state: *FrameState) void {
     state.full_redraw = true;
+}
+
+// ─── Row-level damage tracker (v1.3.3) ─────────────────────────────────
+//
+// Splits the current frame into rows on "\r\n" boundaries, diffs each
+// row against state.row_last[i], and emits only rows that changed.
+// Each emitted row is preceded by a cursor-position escape and CLEAR_LINE
+// so cursor placement is independent of which rows were skipped.
+//
+// On full_redraw: writes the whole frame as-is (same as emit_with_damage)
+// then captures each row into state.row_last.
+
+/// Returns the list of (row_index, row_bytes) pairs that need emit. Pure
+/// — does NOT write anywhere. The caller uses these to emit selectively
+/// (or to assert in tests). Updates state.row_last (cache).
+pub fn diff_rows(
+    state: *FrameState,
+    allocator: std.mem.Allocator,
+    current: []const u8,
+    out_changed: *std.ArrayList(usize),
+) void {
+    out_changed.clearRetainingCapacity();
+
+    // Walk current frame, splitting on "\r\n" into row slices.
+    // For each row, compare against state.row_last[i]; if different,
+    // record row index + update cache.
+    var row_idx: usize = 0;
+    var line_start: usize = 0;
+    var i: usize = 0;
+    while (i + 1 < current.len) : (i += 1) {
+        if (current[i] == '\r' and current[i + 1] == '\n') {
+            const row_bytes = current[line_start .. i + 2]; // include \r\n
+            if (state.full_redraw or rowDiffers(state, row_idx, row_bytes)) {
+                out_changed.append(allocator, row_idx) catch return;
+                captureRow(state, allocator, row_idx, row_bytes);
+            }
+            row_idx += 1;
+            line_start = i + 2;
+            i += 1; // skip the \n
+            if (row_idx >= FrameState.MAX_ROWS) break;
+        }
+    }
+    // Tail (no trailing \r\n)
+    if (line_start < current.len and row_idx < FrameState.MAX_ROWS) {
+        const row_bytes = current[line_start..];
+        if (state.full_redraw or rowDiffers(state, row_idx, row_bytes)) {
+            out_changed.append(allocator, row_idx) catch return;
+            captureRow(state, allocator, row_idx, row_bytes);
+        }
+        row_idx += 1;
+    }
+    state.row_count = row_idx;
+    state.full_redraw = false;
+}
+
+fn rowDiffers(state: *const FrameState, row_idx: usize, candidate: []const u8) bool {
+    if (row_idx >= FrameState.MAX_ROWS) return true;
+    const cached = state.row_last[row_idx] orelse return true;
+    return !std.mem.eql(u8, cached, candidate);
+}
+
+fn captureRow(state: *FrameState, allocator: std.mem.Allocator, row_idx: usize, bytes: []const u8) void {
+    if (row_idx >= FrameState.MAX_ROWS) return;
+    if (state.row_last[row_idx]) |old| allocator.free(old);
+    state.row_last[row_idx] = allocator.dupe(u8, bytes) catch null;
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────
@@ -390,6 +481,63 @@ test "render_to_buf produces deterministic output for the empty-buffer case" {
     render_to_buf(&out2, allocator, null, 0, 0, 0, null);
     try std.testing.expectEqualSlices(u8, out1.items, out2.items);
     try std.testing.expect(out1.items.len > 0);
+}
+
+test "diff_rows: first call reports every row changed; second identical call reports none" {
+    const allocator = std.testing.allocator;
+    var state = FrameState{};
+    defer state.deinit(allocator);
+
+    // Synthetic 3-row frame.
+    const frame = "row alpha\r\nrow beta\r\nrow gamma\r\n";
+    var changed: std.ArrayList(usize) = .empty;
+    defer changed.deinit(allocator);
+
+    diff_rows(&state, allocator, frame, &changed);
+    try std.testing.expectEqual(@as(usize, 3), changed.items.len);
+    try std.testing.expectEqual(@as(usize, 0), changed.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), changed.items[2]);
+
+    diff_rows(&state, allocator, frame, &changed);
+    try std.testing.expectEqual(@as(usize, 0), changed.items.len);
+}
+
+test "diff_rows: reports only the rows that actually changed" {
+    const allocator = std.testing.allocator;
+    var state = FrameState{};
+    defer state.deinit(allocator);
+
+    const frame_a = "row alpha\r\nrow beta\r\nrow gamma\r\n";
+    const frame_b = "row alpha\r\nROW BETA\r\nrow gamma\r\n";
+    var changed: std.ArrayList(usize) = .empty;
+    defer changed.deinit(allocator);
+
+    diff_rows(&state, allocator, frame_a, &changed);
+    try std.testing.expectEqual(@as(usize, 3), changed.items.len); // first call: all
+
+    diff_rows(&state, allocator, frame_b, &changed);
+    try std.testing.expectEqual(@as(usize, 1), changed.items.len); // only middle row
+    try std.testing.expectEqual(@as(usize, 1), changed.items[0]);
+}
+
+test "diff_rows: invalidate forces all rows to re-emit" {
+    const allocator = std.testing.allocator;
+    var state = FrameState{};
+    defer state.deinit(allocator);
+
+    const frame = "a\r\nb\r\nc\r\n";
+    var changed: std.ArrayList(usize) = .empty;
+    defer changed.deinit(allocator);
+
+    diff_rows(&state, allocator, frame, &changed); // first call, all 3
+    try std.testing.expectEqual(@as(usize, 3), changed.items.len);
+
+    diff_rows(&state, allocator, frame, &changed); // no diff
+    try std.testing.expectEqual(@as(usize, 0), changed.items.len);
+
+    invalidate(&state);
+    diff_rows(&state, allocator, frame, &changed); // forced full
+    try std.testing.expectEqual(@as(usize, 3), changed.items.len);
 }
 
 test "FrameState damage tracker: frame_changed returns true on first call + cached comparison" {
