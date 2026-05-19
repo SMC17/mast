@@ -152,6 +152,20 @@ pub fn build(b: *std.Build) void {
     const doctest_step = b.step("doctest", "Verify README executable claims against the shipped binary");
     doctest_step.dependOn(&doctest.step);
 
+    // `zig build cfunction-audit` — host-cfunction sandbox-discipline
+    // audit (closes docs/SANDBOX_THREAT_MODEL.md §6 residual #10). Walks
+    // every janet_def-registered cfunction and FAILS if any touches a
+    // dangerous syscall (libc.system/popen/exec/fork) without consulting
+    // the capability set. Also wired into `zig build test` so the
+    // discipline is exercised on every test run.
+    const cfunc_audit = b.addSystemCommand(&.{
+        "bash",
+        "tools/cfunction-audit.sh",
+    });
+    const cfunc_audit_step = b.step("cfunction-audit", "Host-cfunction sandbox-discipline regression scan");
+    cfunc_audit_step.dependOn(&cfunc_audit.step);
+    test_step.dependOn(&cfunc_audit.step);
+
     // `zig build bench-buffer` — buffer-protocol throughput benchmark.
     // Reports parseable bench=NAME ... ns_per_op=N lines to stderr.
     const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
