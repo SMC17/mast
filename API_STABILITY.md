@@ -44,31 +44,73 @@ field types are documented in `src/buffer.zig`.
 
 ### The M-x verb surface
 
-The built-in M-x verbs (`pid`, `help`, `display`, `buffer-name`,
-`buffer-size`, `append`, `save`, `save-as`, `stax-search`,
-`stax-dashboard`, `stax-hunger`, `exit`) and the Janet fall-through
-eval path are stable. New verbs may be added at any minor version.
+The built-in M-x verbs are stable. As of v1.3.0:
+
+- **Core:** `pid`, `help`, `display`, `exit`
+- **Buffer introspection:** `buffer-name`, `buffer-size`, `buffer-count`
+- **Buffer mutation:** `append <text…>`, `save`, `save-as <path>`
+- **Multi-buffer ring:** `list-buffers`, `next-buffer`, `prev-buffer`,
+  `switch-buffer N`, `new-buffer <name>`
+- **Agent-as-buffer:** `agent-run <cmd>`
+- **stax-fleet bridges:** `stax-search Q`, `stax-dashboard`, `stax-hunger`
+- **Raw Janet fall-through:** any line not matching a builtin is
+  evaluated in the live Janet env
+
+New verbs may be added at any minor version. Removal happens only at
+a major version bump with the deprecation window below.
 
 ### The Janet C-callback ABI
 
-`cmd_stax_pid`, `cmd_buffer_name`, `cmd_buffer_size` — the three
-C-callbacks the Janet runtime invokes — are stable in signature and
-semantics. Adding new C-callbacks is a minor bump; renaming or
-removing existing ones is a major bump with the deprecation window
-below.
+The C-callbacks the Janet runtime invokes are stable in signature.
+As of v1.3.0:
+
+- `(stax-pid)`, `(buffer-name)`, `(buffer-size)`, `(buffer-count)`,
+  `(buffer-current-index)`, `(buffer-next)`, `(buffer-prev)`,
+  `(buffer-switch idx)` — host introspection / navigation
+- `(agent/run cmd)` — sync spawn-and-capture (returns buffer index)
+- `(agent/spawn cmd)` — async spawn (returns handle int)
+- `(agent/poll handle)` — drain pipe, return exit-status int or nil
+- `(agent/wait handle)` — block until exit, return exit-status int
+- `(agent/count)`, `(agent/alive? handle)` — handle introspection
+- `(stax-bash cmd)` — capability-gated shell-out
+
+Adding new C-callbacks is a minor bump; renaming or removing existing
+ones is a major bump with the deprecation window below.
+
+### The TUI surface (v1.3.0)
+
+The `--tui` CLI flag and the in-house ANSI/termios windowed view are
+stable in v1.x. Key bindings (`j`/`k`/Up/Down scroll, `g`/`G`
+top/bottom, `n`/`p` cycle buffers, `:` minibuffer, `q`/Ctrl-C exit)
+may grow but will not change meaning at a minor version. The
+underlying renderer (full-redraw per keystroke; row prefix; reverse-
+video status; ANSI escape codes) is implementation detail subject to
+change at minor versions.
 
 ## What's stable in the sandbox
 
 Per [docs/SANDBOX_THREAT_MODEL.md](docs/SANDBOX_THREAT_MODEL.md):
 
-- `os/shell` requires the `exec` capability or panics — load-bearing
-  default-deny.
-- `MAST_SANDBOX_STRICT=1` env var disables the eval/load fall-through
-  for untrusted contexts.
+- `os/shell` and `stax-bash` require the `exec` capability or panic —
+  load-bearing default-deny, mutation-test M01 KILLED.
+- `MAST_SANDBOX_STRICT=1` env var suppresses the v1 host-policy
+  auto-grant of `exec` so the production binary exhibits default-deny.
 - `gated_stax_bash` accepts exactly one argv element; any other count
-  panics.
-- The sandbox's `Capability` set (`{.exec}`) may grow new variants at
-  minor versions (consumers should handle unknown caps gracefully).
+  panics (M04 KILLED).
+- **31-entry `REMOVED_BINDINGS` static list** (v1.3.0): the dangerous
+  Janet symbols documented in threat-model §5.2 are removed from the
+  embedded env via panic stubs. The static list and the load-bearing
+  test (`G2 closure: every REMOVED_BINDINGS entry panics from Janet`)
+  iterate the same set; adding to one without the other trips CI.
+- **`sandbox.g_deny_observer` callback** (v1.3.x): host hook that
+  fires BEFORE `janet_panicf` for every deny event. Categories enum
+  (`exec_gated`, `subprocess`, `file_io`, `net`, `native`, `unmarshal`,
+  `exit`, `dofile`, `env`, `fs_ancillary`) may grow at minor versions.
+- The sandbox's `Capability` set may grow new variants at minor
+  versions (consumers should handle unknown caps gracefully).
+- **`tools/cfunction-audit.sh`** (v1.3.x): static check that every
+  host-registered cfunction with a dangerous syscall in its body
+  consults the capability set. Wired into `zig build test`.
 
 ## What's UNSTABLE
 
@@ -110,6 +152,8 @@ not the cosign double-provenance the substrate-tier projects ship).
 |---------|----------------------------------------------------------------|---------------------------------------------------|
 | v0.1.0  | initial buffer + Janet embed                                   | first release                                     |
 | v0.1.1  | sandbox capability model + 4 sandbox tests                     | `MAST_SANDBOX_STRICT` env var                     |
-| v1.0.0  | production-grade hygiene milestone                             | LICENSE / SECURITY / CONTRIBUTING / CODE_OF_CONDUCT |
+| v1.0.0  | shipping-process hygiene milestone (still pre-1.0 in spirit)   | LICENSE / SECURITY / CONTRIBUTING / CODE_OF_CONDUCT |
 | v1.1.0  | file-write buffer ops + atomic save + 12 doctest checks        | save / saveAs / mutation harness 8/10            |
 | v1.2.0  | 7200-trial property corpus + buffer-protocol benchmark         | BENCH.md + 16/16 tests + GPG-signed tag           |
+| v1.3.0  | G2 sandbox closure (31 removed bindings) + multi-buffer ring + agent-as-buffer (sync + async/live-tail) + in-house ANSI/termios TUI behind --tui | `(agent/spawn/poll/wait/count/alive?)`, `M-x list-buffers/next/prev/switch-buffer/new-buffer/agent-run`, `--tui` flag, 22/22 tests |
+| v1.3.x  | residual closures: sandbox-deny audit routing (§6 #9) + agent/wait poll(2) (§6 #8) + host-cfunction regression discipline (§6 #10) + TUI minibuffer sentinels | `tools/cfunction-audit.sh`, `sandbox.DenyCategory` + `g_deny_observer`, doctest extended to 25/25 |
