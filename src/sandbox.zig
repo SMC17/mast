@@ -261,6 +261,31 @@ fn panic_removed_dofile(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Jan
     );
 }
 
+fn panic_removed_env(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    janet.janet_panicf(
+        "mast.sandbox: environment-variable bindings are REMOVED in v0.2.1 — " ++
+            "env vars routinely carry secrets (TOKEN_*, AWS_*, ANTHROPIC_API_KEY); " ++
+            "no script-side granted path. v0.3 may add a host-bound allowlisted " ++
+            "(env/get \"KEY_NAME\") with explicit per-key grants. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §3 + §6 #6.",
+    );
+}
+
+fn panic_removed_fs_ancillary(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    janet.janet_panicf(
+        "mast.sandbox: ancillary filesystem-metadata bindings are REMOVED in v0.2.1 — " ++
+            "directory enumeration / stat / mkdir / rm / rename / chmod / symlink " ++
+            "give partial visibility and mutation without going through the primary " ++
+            "read/write path that v0.2 already removed. v0.3 will add per-path-prefix " ++
+            "fs_read / fs_write capability gating. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §3 + §6 #7.",
+    );
+}
+
 /// The static list of removals. Each entry: (Janet symbol, panic stub,
 /// short docstring shown by Janet's `(doc ...)`). Adding to this list is
 /// a single-line change; the test below iterates the same list to prove
@@ -295,6 +320,30 @@ pub const REMOVED_BINDINGS = [_]RemovedBinding{
     .{ .sym = "native", .stub = panic_removed_native, .doc = "mast-sandbox: REMOVED in v0.2." },
     .{ .sym = "unmarshal", .stub = panic_removed_unmarshal, .doc = "mast-sandbox: REMOVED in v0.2." },
     .{ .sym = "os/exit", .stub = panic_removed_exit, .doc = "mast-sandbox: REMOVED in v0.2." },
+
+    // v0.2.1 (2026-05-19) — residual #6 closure: environment-variable bindings.
+    // Env vars routinely carry secrets; no script-side granted path is honest in v0.2.
+    .{ .sym = "os/getenv", .stub = panic_removed_env, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/setenv", .stub = panic_removed_env, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/environ", .stub = panic_removed_env, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+
+    // v0.2.1 (2026-05-19) — residual #7 closure: ancillary filesystem-metadata
+    // bindings. Lower blast than file/open + slurp + spit (no content read or
+    // large write), but a Janet script can still enumerate the user's home
+    // directory or chmod 777 a file. Removed in v0.2.1; v0.3 path-prefix
+    // capabilities will reinstate granted paths.
+    .{ .sym = "os/stat", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/lstat", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/dir", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/realpath", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/readlink", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/mkdir", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/rmdir", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/rm", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/rename", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/touch", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/symlink", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+    .{ .sym = "os/chmod", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
 };
 
 // ─── Application ────────────────────────────────────────────────────────
@@ -561,6 +610,23 @@ test "G2 closure: every REMOVED_BINDINGS entry panics from Janet" {
         .{ .sym = "native", .src = "(native \"/nonexistent.so\")" },
         .{ .sym = "unmarshal", .src = "(unmarshal @\"x\")" },
         .{ .sym = "os/exit", .src = "(os/exit 0)" },
+        // v0.2.1 — env-var residual #6
+        .{ .sym = "os/getenv", .src = "(os/getenv \"HOME\")" },
+        .{ .sym = "os/setenv", .src = "(os/setenv \"X\" \"y\")" },
+        .{ .sym = "os/environ", .src = "(os/environ)" },
+        // v0.2.1 — ancillary fs residual #7
+        .{ .sym = "os/stat", .src = "(os/stat \"/etc/hostname\")" },
+        .{ .sym = "os/lstat", .src = "(os/lstat \"/etc/hostname\")" },
+        .{ .sym = "os/dir", .src = "(os/dir \"/tmp\")" },
+        .{ .sym = "os/realpath", .src = "(os/realpath \"/etc\")" },
+        .{ .sym = "os/readlink", .src = "(os/readlink \"/etc/hostname\")" },
+        .{ .sym = "os/mkdir", .src = "(os/mkdir \"/tmp/mast-test-mkdir\")" },
+        .{ .sym = "os/rmdir", .src = "(os/rmdir \"/tmp/mast-test-rmdir\")" },
+        .{ .sym = "os/rm", .src = "(os/rm \"/tmp/mast-test-rm\")" },
+        .{ .sym = "os/rename", .src = "(os/rename \"/tmp/a\" \"/tmp/b\")" },
+        .{ .sym = "os/touch", .src = "(os/touch \"/tmp/mast-test-touch\")" },
+        .{ .sym = "os/symlink", .src = "(os/symlink \"/tmp/x\" \"/tmp/y\")" },
+        .{ .sym = "os/chmod", .src = "(os/chmod \"/tmp/x\" 8r777)" },
     };
 
     // The static list and the test list MUST cover the same set. If

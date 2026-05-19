@@ -63,9 +63,14 @@ substrate until both gates above close.
   `os/shell` + `stax-bash` (both gated on `exec`). The
   `REMOVED_BINDINGS` static list and the `G2 closure` test iterate the
   same set, so adding to one without the other will trip CI.
-  Status: `CLOSED 2026-05-19`. Residual env-var bindings (`os/getenv`,
-  `os/setenv`, `os/environ`) are tracked separately — not in the
-  original G2 scope.
+  Status: `CLOSED 2026-05-19`. **v0.2.1 follow-up the same day** closed
+  the two named residual gaps (#6 env-var bindings, #7 ancillary
+  filesystem-metadata bindings) using the same `REMOVED_BINDINGS`
+  pattern: `os/getenv` / `os/setenv` / `os/environ` removed, and the
+  12 ancillary `os/` filesystem bindings (`stat`/`lstat`/`dir`/
+  `realpath`/`readlink`/`mkdir`/`rmdir`/`rm`/`rename`/`touch`/
+  `symlink`/`chmod`) removed. Static list now at 31 entries;
+  test iterates 31/31.
 - **G3 — Soak time.** ≥30 days of continuous mast use as the daily
   editor for at least one real workflow (driving real-stax-CLI
   invocations, holding real buffers under real edits), with the

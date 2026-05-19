@@ -28,6 +28,8 @@ const libc = @cImport({
     @cInclude("stdlib.h");
     @cInclude("stdio.h");
     @cInclude("fcntl.h");
+    @cInclude("sys/wait.h");
+    @cInclude("signal.h");
 });
 
 const Allocator = std.mem.Allocator;
@@ -162,6 +164,281 @@ fn cmd_buffer_prev(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
     return janet.janet_wrap_integer(@intCast(prevBuffer()));
+}
+
+// ─── Async agent handle table (v0.3 of agent-as-buffer) ────────────────
+//
+// (agent/spawn cmd) is the non-blocking variant of (agent/run cmd). It
+// fork+execs the command with a stdout pipe captured non-blockingly,
+// creates a new :agent buffer for the live stream, and returns a HANDLE id
+// (integer) the script can poll.
+//
+//   (def h (agent/spawn "stax-search merchants"))
+//   (agent/poll h)   # nil if still running; exit-status integer if done
+//   (agent/wait h)   # block until done, return exit status
+//   (agent/list)     # tuple of {:id N :pid P :buffer-index I :closed B}
+//
+// This is the steipete-thesis surface in v0.3 form: many agents running
+// in the background, each addressable as a buffer, each pollable as a
+// handle. The buffer accumulates bytes as `agent/poll` is called.
+//
+// Lifecycle invariants:
+//   - Handle id is the index into g_agents; never reused, never reordered.
+//   - The :agent buffer at h.buffer_idx is owned by the buffer ring;
+//     g_agents.items[h] holds the index, not the buffer pointer
+//     (the ArrayList could relocate on grow).
+//   - h.stdout_fd is closed exactly once — when the child exits AND poll
+//     observes the exit. Tracked by h.closed.
+//   - Zombie reaping: waitpid is called on every poll; explicit (agent/wait)
+//     loops polling.
+
+const AgentHandle = struct {
+    pid: i32,
+    stdout_fd: i32,
+    buffer_idx: usize,
+    closed: bool = false,
+    exit_status: i32 = 0,
+};
+
+var g_agents: std.ArrayList(AgentHandle) = .empty;
+
+/// Drain any bytes currently available on `h.stdout_fd` into the agent's
+/// buffer. Returns the number of bytes drained on this call (0 if the
+/// fd had nothing ready; the fd is O_NONBLOCK so reads do not block).
+fn agentDrain(allocator: Allocator, h: *AgentHandle) usize {
+    if (h.closed) return 0;
+    if (h.buffer_idx >= g_buffers.items.len) return 0;
+    var total: usize = 0;
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const n = libc.read(h.stdout_fd, &chunk, chunk.len);
+        if (n <= 0) break;
+        const slice = chunk[0..@intCast(n)];
+        g_buffers.items[h.buffer_idx].append(slice) catch return total;
+        total += @intCast(n);
+    }
+    _ = allocator; // append uses the Buffer's own allocator
+    return total;
+}
+
+/// `(agent/spawn cmd)` — fork+exec cmd with a non-blocking stdout pipe.
+/// Creates a new :agent buffer for live stdout capture. Returns the
+/// handle id (integer), which doubles as the index in g_agents. Switches
+/// focus to the newly-created agent buffer.
+fn cmd_agent_spawn(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (!sandbox.g_sandbox.has(.exec)) {
+        janet.janet_panicf("mast.sandbox: agent/spawn denied — `exec` capability not granted (default-deny)");
+    }
+    if (argc != 1) {
+        janet.janet_panicf("agent/spawn: expected 1 string argument (cmd), got %d", argc);
+    }
+
+    const allocator = std.heap.c_allocator;
+    const s_ptr = janet.janet_unwrap_string(argv[0]);
+    const s_len = std.mem.len(s_ptr);
+
+    // Buffer name: shell command, sanitized + truncated to 64 chars.
+    var name_buf: [80]u8 = undefined;
+    const name_len = @min(s_len, 64);
+    var ni: usize = 0;
+    while (ni < name_len) : (ni += 1) {
+        const ch = s_ptr[ni];
+        name_buf[ni] = if (ch >= 0x20 and ch < 0x7f) ch else '?';
+    }
+    const buf = Buffer.fromBytes(allocator, .agent, name_buf[0..name_len], "") catch {
+        janet.janet_panicf("agent/spawn: failed to create :agent buffer");
+    };
+    const buf_idx = addBuffer(allocator, buf) catch {
+        janet.janet_panicf("agent/spawn: failed to add buffer to ring");
+    };
+
+    // Pipe + fork + exec via /bin/sh -c <cmd>.
+    var pipefd: [2]c_int = undefined;
+    if (libc.pipe(&pipefd) != 0) {
+        janet.janet_panicf("agent/spawn: pipe(2) failed");
+    }
+
+    // C string for the command (Janet strings are not null-terminated guaranteed).
+    const cmd_z = allocator.dupeZ(u8, @as([*]const u8, @ptrCast(s_ptr))[0..s_len]) catch {
+        _ = libc.close(pipefd[0]);
+        _ = libc.close(pipefd[1]);
+        janet.janet_panicf("agent/spawn: OOM allocating command string");
+    };
+    defer allocator.free(cmd_z);
+
+    const child = libc.fork();
+    if (child < 0) {
+        _ = libc.close(pipefd[0]);
+        _ = libc.close(pipefd[1]);
+        allocator.free(cmd_z);
+        janet.janet_panicf("agent/spawn: fork(2) failed");
+    }
+    if (child == 0) {
+        // Child: dup pipe-write to stdout, close pipe ends, exec.
+        _ = libc.dup2(pipefd[1], 1);
+        // Also redirect stderr to the same pipe so the buffer captures both.
+        _ = libc.dup2(pipefd[1], 2);
+        _ = libc.close(pipefd[0]);
+        _ = libc.close(pipefd[1]);
+        const sh: [*c]const u8 = @ptrCast("/bin/sh");
+        // Use execv with a 4-element argv array; sidesteps variadic-null
+        // marshalling that Zig 0.16 declines to guarantee for execl.
+        const argv_array = [_:null]?[*:0]const u8{
+            "/bin/sh",
+            "-c",
+            @ptrCast(cmd_z.ptr),
+        };
+        _ = libc.execv(sh, @ptrCast(@constCast(&argv_array)));
+        // execv only returns on failure.
+        libc.exit(127);
+    }
+
+    // Parent: close write end, set read end non-blocking, register handle.
+    _ = libc.close(pipefd[1]);
+    const flags = libc.fcntl(pipefd[0], libc.F_GETFL, @as(c_int, 0));
+    _ = libc.fcntl(pipefd[0], libc.F_SETFL, flags | libc.O_NONBLOCK);
+
+    g_agents.append(allocator, .{
+        .pid = @intCast(child),
+        .stdout_fd = pipefd[0],
+        .buffer_idx = buf_idx,
+    }) catch {
+        _ = libc.close(pipefd[0]);
+        janet.janet_panicf("agent/spawn: failed to register handle");
+    };
+    const handle_id = g_agents.items.len - 1;
+
+    if (g_audit) |a| {
+        a.write("agent-spawn", .{
+            .handle = handle_id,
+            .pid = child,
+            .buffer_index = buf_idx,
+        }) catch {};
+    }
+
+    return janet.janet_wrap_integer(@intCast(handle_id));
+}
+
+/// `(agent/poll handle)` — drain any bytes ready on the agent's stdout
+/// into its :agent buffer, then check whether the child has exited.
+/// Returns the integer exit status if the child has exited, nil otherwise.
+/// On error returns the keyword :error. Safe to call repeatedly.
+fn cmd_agent_poll(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc != 1) {
+        janet.janet_panicf("agent/poll: expected 1 integer argument (handle), got %d", argc);
+    }
+    var handle_id_i32: i32 = -1;
+    const t = janet.janet_type(argv[0]);
+    if (t == janet.JANET_NUMBER) {
+        handle_id_i32 = janet.janet_unwrap_integer(argv[0]);
+    } else if (t == janet.JANET_STRING) {
+        const s_ptr = janet.janet_unwrap_string(argv[0]);
+        const len = janet.janet_string_length(s_ptr);
+        const bytes = @as([*]const u8, @ptrCast(s_ptr))[0..@intCast(len)];
+        handle_id_i32 = std.fmt.parseInt(i32, bytes, 10) catch -1;
+    }
+    if (handle_id_i32 < 0) return janet.janet_wrap_nil();
+    const hid: usize = @intCast(handle_id_i32);
+    if (hid >= g_agents.items.len) return janet.janet_wrap_nil();
+    const h = &g_agents.items[hid];
+
+    const allocator = std.heap.c_allocator;
+    _ = agentDrain(allocator, h);
+
+    if (h.closed) return janet.janet_wrap_integer(h.exit_status);
+
+    var status: c_int = 0;
+    const rc = libc.waitpid(@intCast(h.pid), &status, libc.WNOHANG);
+    if (rc == 0) return janet.janet_wrap_nil(); // still running
+    if (rc < 0) return janet.janet_wrap_nil();
+    // Child exited — drain one more time in case bytes arrived between
+    // the read loop and the waitpid call.
+    _ = agentDrain(allocator, h);
+    h.closed = true;
+    // WEXITSTATUS macro: low byte after >> 8.
+    h.exit_status = @intCast((status >> 8) & 0xff);
+    _ = libc.close(h.stdout_fd);
+    if (g_audit) |a| {
+        a.write("agent-exit", .{
+            .handle = hid,
+            .pid = h.pid,
+            .exit_status = h.exit_status,
+        }) catch {};
+    }
+    return janet.janet_wrap_integer(h.exit_status);
+}
+
+/// `(agent/wait handle)` — block until the agent exits, return exit status.
+/// Internally a poll loop with 10ms sleeps. v0.3.x will route through
+/// poll(2) on the stdout_fd + the child for a true select-based wait.
+fn cmd_agent_wait(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc != 1) {
+        janet.janet_panicf("agent/wait: expected 1 integer argument (handle), got %d", argc);
+    }
+    var handle_id_i32: i32 = -1;
+    const t = janet.janet_type(argv[0]);
+    if (t == janet.JANET_NUMBER) {
+        handle_id_i32 = janet.janet_unwrap_integer(argv[0]);
+    } else if (t == janet.JANET_STRING) {
+        const s_ptr = janet.janet_unwrap_string(argv[0]);
+        const len = janet.janet_string_length(s_ptr);
+        const bytes = @as([*]const u8, @ptrCast(s_ptr))[0..@intCast(len)];
+        handle_id_i32 = std.fmt.parseInt(i32, bytes, 10) catch -1;
+    }
+    if (handle_id_i32 < 0) return janet.janet_wrap_integer(-1);
+    const hid: usize = @intCast(handle_id_i32);
+    if (hid >= g_agents.items.len) return janet.janet_wrap_integer(-1);
+    const h = &g_agents.items[hid];
+
+    const allocator = std.heap.c_allocator;
+    while (!h.closed) {
+        _ = agentDrain(allocator, h);
+        var status: c_int = 0;
+        const rc = libc.waitpid(@intCast(h.pid), &status, libc.WNOHANG);
+        if (rc > 0) {
+            _ = agentDrain(allocator, h);
+            h.closed = true;
+            h.exit_status = @intCast((status >> 8) & 0xff);
+            _ = libc.close(h.stdout_fd);
+            if (g_audit) |a| {
+                a.write("agent-exit", .{
+                    .handle = hid,
+                    .pid = h.pid,
+                    .exit_status = h.exit_status,
+                }) catch {};
+            }
+            break;
+        }
+        if (rc < 0) break;
+        _ = libc.usleep(10_000); // 10ms
+    }
+    return janet.janet_wrap_integer(h.exit_status);
+}
+
+/// `(agent/count)` — number of registered handles (running + exited).
+fn cmd_agent_count(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    return janet.janet_wrap_integer(@intCast(g_agents.items.len));
+}
+
+/// `(agent/alive? handle)` — boolean, true if handle exists and is unclosed.
+fn cmd_agent_alive(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc != 1) return janet.janet_wrap_false();
+    var handle_id_i32: i32 = -1;
+    const t = janet.janet_type(argv[0]);
+    if (t == janet.JANET_NUMBER) {
+        handle_id_i32 = janet.janet_unwrap_integer(argv[0]);
+    } else if (t == janet.JANET_STRING) {
+        const s_ptr = janet.janet_unwrap_string(argv[0]);
+        const len = janet.janet_string_length(s_ptr);
+        const bytes = @as([*]const u8, @ptrCast(s_ptr))[0..@intCast(len)];
+        handle_id_i32 = std.fmt.parseInt(i32, bytes, 10) catch -1;
+    }
+    if (handle_id_i32 < 0) return janet.janet_wrap_false();
+    const hid: usize = @intCast(handle_id_i32);
+    if (hid >= g_agents.items.len) return janet.janet_wrap_false();
+    return if (g_agents.items[hid].closed) janet.janet_wrap_false() else janet.janet_wrap_true();
 }
 
 /// `(agent/run cmd)` — shell out, capture stdout into a NEW :agent buffer,
@@ -661,6 +938,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     janet.janet_def(env, "buffer-prev", janet.janet_wrap_cfunction(cmd_buffer_prev), "Cycle focus backward; returns new index.");
     janet.janet_def(env, "buffer-switch", janet.janet_wrap_cfunction(cmd_buffer_switch), "(buffer-switch idx) — focus buffer at index, returns new index or -1.");
     janet.janet_def(env, "agent/run", janet.janet_wrap_cfunction(cmd_agent_run), "(agent/run cmd) — spawn cmd, capture stdout into a new :agent buffer, return its index. Requires `exec`.");
+    janet.janet_def(env, "agent/spawn", janet.janet_wrap_cfunction(cmd_agent_spawn), "(agent/spawn cmd) — non-blocking fork+exec; returns handle id. Buffer receives stdout via agent/poll. Requires `exec`.");
+    janet.janet_def(env, "agent/poll", janet.janet_wrap_cfunction(cmd_agent_poll), "(agent/poll handle) — drain stdout into buffer; return exit status int if exited, nil otherwise.");
+    janet.janet_def(env, "agent/wait", janet.janet_wrap_cfunction(cmd_agent_wait), "(agent/wait handle) — block until agent exits, return exit status.");
+    janet.janet_def(env, "agent/count", janet.janet_wrap_cfunction(cmd_agent_count), "(agent/count) — number of registered agent handles.");
+    janet.janet_def(env, "agent/alive?", janet.janet_wrap_cfunction(cmd_agent_alive), "(agent/alive? handle) — true if handle exists and is unclosed.");
 
     // Install capability-gated wrappers over Janet's stdlib dangerous
     // bindings. The MECHANISM is default-deny at the binding boundary;
@@ -724,6 +1006,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer {
         for (g_buffers.items) |*b| b.deinit();
         g_buffers.deinit(allocator);
+    }
+    // Reap any still-running agents at process exit so we don't leak zombies.
+    // Best-effort: SIGTERM, drain pipe, close fd, waitpid. Per-handle errors
+    // are swallowed because we're already exiting.
+    defer {
+        for (g_agents.items) |*h| {
+            if (!h.closed) {
+                _ = libc.kill(@intCast(h.pid), libc.SIGTERM);
+                _ = libc.close(h.stdout_fd);
+                var st: c_int = 0;
+                _ = libc.waitpid(@intCast(h.pid), &st, 0);
+            }
+        }
+        g_agents.deinit(allocator);
     }
 
     // Load $XDG_CONFIG_HOME/mast/init.janet (default ~/.config/mast/init.janet)
