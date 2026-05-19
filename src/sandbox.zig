@@ -772,6 +772,118 @@ test "G2 closure: applyDefaultDeny returns the expected number of replacements" 
     try std.testing.expectEqual(1 + REMOVED_BINDINGS.len, n);
 }
 
+// ─── Property tests (v1.3.3) ──────────────────────────────────────────
+//
+// The example-based tests above pin specific scenarios. The property
+// tests below assert load-bearing invariants under randomized input:
+// no specific test scenario could prove "for ALL grant sequences,
+// revokeAll yields the empty set," so we generate sequences randomly
+// and check the invariant on each.
+
+test "property: capability set — grant is idempotent under random sequences (5000 trials)" {
+    var prng = std.Random.DefaultPrng.init(0x9c1d4a8b_3f7e0612);
+    const rand = prng.random();
+    const cap_count = @typeInfo(Capability).@"enum".fields.len;
+    var trial: usize = 0;
+    while (trial < 5000) : (trial += 1) {
+        var caps: CapabilitySet = .empty();
+        // Random sequence of grants, possibly repeated.
+        const n_ops = rand.intRangeAtMost(usize, 0, 50);
+        var op: usize = 0;
+        while (op < n_ops) : (op += 1) {
+            const idx = rand.intRangeAtMost(usize, 0, cap_count - 1);
+            const cap: Capability = @enumFromInt(idx);
+            caps.grant(cap);
+            try std.testing.expect(caps.has(cap));
+        }
+        // After the grant sequence, every granted cap remains granted.
+        op = 0;
+        while (op < cap_count) : (op += 1) {
+            const cap: Capability = @enumFromInt(op);
+            const should_have = (caps.bits & (@as(u32, 1) << @intCast(op))) != 0;
+            try std.testing.expectEqual(should_have, caps.has(cap));
+        }
+    }
+}
+
+test "property: capability set — revokeAll always empties the set (1000 trials)" {
+    var prng = std.Random.DefaultPrng.init(0x71fa2e90_8c4b1d57);
+    const rand = prng.random();
+    const cap_count = @typeInfo(Capability).@"enum".fields.len;
+    var trial: usize = 0;
+    while (trial < 1000) : (trial += 1) {
+        revokeAll();
+        const n_ops = rand.intRangeAtMost(usize, 0, 20);
+        var op: usize = 0;
+        while (op < n_ops) : (op += 1) {
+            const idx = rand.intRangeAtMost(usize, 0, cap_count - 1);
+            grant(@enumFromInt(idx));
+        }
+        revokeAll();
+        // After revokeAll: NO capability is held.
+        op = 0;
+        while (op < cap_count) : (op += 1) {
+            try std.testing.expect(!g_sandbox.has(@enumFromInt(op)));
+        }
+    }
+}
+
+test "property: REMOVED_BINDINGS panic invariance under random cap sets (200 trials)" {
+    // The load-bearing property: granting ANY capability set must NOT
+    // cause any REMOVED binding to bypass its panic. The example-based
+    // G2 closure test runs one cap set (all granted); this property
+    // test runs random cap sets, including the empty set, single-cap
+    // sets, and arbitrary mixes. If a regression accidentally routes
+    // a removed binding through a cap check, a non-fully-granted set
+    // would catch it before the example test does.
+    if (janet.janet_init() != 0) return error.JanetInitFailed;
+    defer janet.janet_deinit();
+
+    const env = janet.janet_core_env(null) orelse return error.NoCoreEnv;
+    revokeAll();
+    _ = applyDefaultDeny(env);
+    defer revokeAll();
+
+    var prng = std.Random.DefaultPrng.init(0xa05b3c9d_2f168e74);
+    const rand = prng.random();
+    const cap_count = @typeInfo(Capability).@"enum".fields.len;
+
+    // Pick one representative invocation per removed-symbol category;
+    // the load-bearing claim is "removal panics REGARDLESS of caps."
+    const probes = [_][:0]const u8{
+        "(os/execute [\"true\"] :p)",
+        "(slurp \"/etc/hostname\")",
+        "(spit \"/tmp/x\" \"y\")",
+        "(net/connect \"127.0.0.1\" \"1\")",
+        "(native \"/nonexistent.so\")",
+        "(unmarshal @\"x\")",
+        "(os/exit 0)",
+        "(os/getenv \"HOME\")",
+        "(os/dir \"/tmp\")",
+    };
+
+    var trial: usize = 0;
+    while (trial < 200) : (trial += 1) {
+        // Randomize the capability set.
+        revokeAll();
+        const n_grants = rand.intRangeAtMost(usize, 0, cap_count);
+        var i: usize = 0;
+        while (i < n_grants) : (i += 1) {
+            const idx = rand.intRangeAtMost(usize, 0, cap_count - 1);
+            grant(@enumFromInt(idx));
+        }
+        // Every probe must panic, regardless of which caps are granted.
+        for (probes) |src| {
+            var out: janet.Janet = undefined;
+            const status = janet.janet_dostring(env, src.ptr, "prop-removal", &out);
+            if (status == 0) {
+                std.debug.print("PROPERTY VIOLATION trial={d}: probe '{s}' did not panic (caps bits=0x{x})\n", .{ trial, src, g_sandbox.bits });
+                return error.RemovedBindingLeakUnderRandomCaps;
+            }
+        }
+    }
+}
+
 test "MAST_SANDBOX_STRICT env parsing: truthy / falsy / case-insensitive" {
     // Truthy values
     try std.testing.expect(strictModeFromEnv("1"));
