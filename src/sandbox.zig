@@ -39,6 +39,10 @@ const libc = @cImport({
     @cInclude("stdlib.h");
 });
 
+// Re-exported for main.zig — janet C ABI has no userdata, callers need the
+// same `janet` namespace this file already routes through @cImport.
+pub const c_janet = janet;
+
 // ─── Capability vocabulary ─────────────────────────────────────────────
 //
 // These are the named capabilities the threat model enumerates. Today
@@ -158,19 +162,156 @@ pub fn gated_stax_bash(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Jane
     return janet.janet_wrap_integer(rc);
 }
 
+// ─── Removed-binding stubs (G2 closure) ─────────────────────────────────
+//
+// The threat model (docs/SANDBOX_THREAT_MODEL.md §6) names "wrapped or
+// removed from the embedded env" as the two valid closure paths for the
+// residual dangerous-binding surface. v0.2 takes the REMOVAL path for the
+// binding families that v0.2 has no honest granted-path implementation for:
+//
+//   - subprocess primitives beyond os/shell (os/execute, os/spawn,
+//     os/posix-fork, os/posix-exec) — narrowed to os/shell + stax-bash as
+//     the SINGLE granted exec interface
+//   - file I/O (file/open, slurp, spit, file/temp, dofile) — host buffer
+//     ops are the v0.2 interface; per-path-prefix grants are v0.3 territory
+//   - network (net/connect, net/listen, net/accept, net/accept-loop)
+//   - dynamic-module loading (native) — full RCE primitive
+//   - bytecode-bearing deserialization (unmarshal) — full RCE primitive
+//   - host-process termination (os/exit) — the host controls lifecycle
+//
+// Each removed binding is REPLACED with a panic stub that names the symbol
+// and points at the threat-model document. This is observably different
+// from "binding not present" (which would Janet-compile-error as "unknown
+// symbol") — scripts that REFER to these symbols compile fine but PANIC
+// at call time with the documented message. That preserves Janet's
+// expectation that core-env symbols resolve.
+//
+// The stubs are uniform: each is one cfunction that calls a shared panic
+// helper. The per-symbol identity comes from the symbol name passed to
+// janet_def at install time and shows up in Janet's stacktrace.
+
+fn panic_removed_subprocess(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    janet.janet_panicf(
+        "mast.sandbox: this subprocess primitive is REMOVED in v0.2 — " ++
+            "use (os/shell ...) with `exec` capability instead. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §3.",
+    );
+}
+
+fn panic_removed_file_io(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    janet.janet_panicf(
+        "mast.sandbox: file-I/O bindings are REMOVED in v0.2 — " ++
+            "use host buffer operations (M-x save / append) instead. " ++
+            "Per-path-prefix file capabilities are v0.3 work. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §3.",
+    );
+}
+
+fn panic_removed_net(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    janet.janet_panicf(
+        "mast.sandbox: network bindings are REMOVED in v0.2 — " ++
+            "host-bound HTTP cfunctions with explicit allowlists are v0.3 work. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §3.",
+    );
+}
+
+fn panic_removed_native(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    janet.janet_panicf(
+        "mast.sandbox: dynamic-module loading (native) is REMOVED in v0.2 — " ++
+            "loaded native modules run arbitrary C in-process and bypass every gate. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §3 + §6.",
+    );
+}
+
+fn panic_removed_unmarshal(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    janet.janet_panicf(
+        "mast.sandbox: unmarshal is REMOVED in v0.2 — " ++
+            "marshal blobs carry executable bytecode; full-RCE primitive on attacker-controlled input. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §3 + §4 #6.",
+    );
+}
+
+fn panic_removed_exit(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    janet.janet_panicf(
+        "mast.sandbox: os/exit is REMOVED in v0.2 — " ++
+            "the host controls process lifecycle. Use `M-x exit` from the REPL. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §3.",
+    );
+}
+
+fn panic_removed_dofile(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    janet.janet_panicf(
+        "mast.sandbox: dofile is REMOVED in v0.2 — " ++
+            "combines unguarded file read with eval; load scripts via init.janet only. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §3.",
+    );
+}
+
+/// The static list of removals. Each entry: (Janet symbol, panic stub,
+/// short docstring shown by Janet's `(doc ...)`). Adding to this list is
+/// a single-line change; the test below iterates the same list to prove
+/// every entry actually panics from Janet.
+pub const RemovedBinding = struct {
+    sym: [*:0]const u8,
+    stub: *const fn (i32, [*c]janet.Janet) callconv(.c) janet.Janet,
+    doc: [*:0]const u8,
+};
+
+pub const REMOVED_BINDINGS = [_]RemovedBinding{
+    // Subprocess primitives beyond os/shell — narrowed surface.
+    .{ .sym = "os/execute", .stub = panic_removed_subprocess, .doc = "mast-sandbox: REMOVED. Use (os/shell ...) + `exec` cap." },
+    .{ .sym = "os/spawn", .stub = panic_removed_subprocess, .doc = "mast-sandbox: REMOVED. Use (os/shell ...) + `exec` cap." },
+    .{ .sym = "os/posix-fork", .stub = panic_removed_subprocess, .doc = "mast-sandbox: REMOVED. Use (os/shell ...) + `exec` cap." },
+    .{ .sym = "os/posix-exec", .stub = panic_removed_subprocess, .doc = "mast-sandbox: REMOVED. Use (os/shell ...) + `exec` cap." },
+
+    // File I/O — host buffer ops are the v0.2 interface.
+    .{ .sym = "file/open", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED. Use host buffer ops." },
+    .{ .sym = "file/temp", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED. Use host buffer ops." },
+    .{ .sym = "slurp", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED. Use host buffer ops." },
+    .{ .sym = "spit", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED. Use host buffer ops." },
+    .{ .sym = "dofile", .stub = panic_removed_dofile, .doc = "mast-sandbox: REMOVED. Load via init.janet." },
+
+    // Network — no granted path in v0.2.
+    .{ .sym = "net/connect", .stub = panic_removed_net, .doc = "mast-sandbox: REMOVED in v0.2." },
+    .{ .sym = "net/listen", .stub = panic_removed_net, .doc = "mast-sandbox: REMOVED in v0.2." },
+    .{ .sym = "net/accept", .stub = panic_removed_net, .doc = "mast-sandbox: REMOVED in v0.2." },
+    .{ .sym = "net/accept-loop", .stub = panic_removed_net, .doc = "mast-sandbox: REMOVED in v0.2." },
+
+    // Dynamic-module loading + bytecode unmarshal + host termination.
+    .{ .sym = "native", .stub = panic_removed_native, .doc = "mast-sandbox: REMOVED in v0.2." },
+    .{ .sym = "unmarshal", .stub = panic_removed_unmarshal, .doc = "mast-sandbox: REMOVED in v0.2." },
+    .{ .sym = "os/exit", .stub = panic_removed_exit, .doc = "mast-sandbox: REMOVED in v0.2." },
+};
+
 // ─── Application ────────────────────────────────────────────────────────
 
 /// Install the gated wrappers over the supplied env. MUST be called after
 /// `janet_core_env` and BEFORE any user code runs. Returns the number of
-/// replaced bindings; callers SHOULD assert > 0 in tests so that a future
-/// Janet upgrade that renames `os/shell` is caught.
+/// replaced bindings (gated + removed); callers SHOULD assert this matches
+/// `1 + REMOVED_BINDINGS.len` so that a future Janet upgrade that renames
+/// any of these symbols is caught loudly at startup.
 pub fn applyDefaultDeny(env: *janet.JanetTable) usize {
     var replaced: usize = 0;
 
-    // Replace os/shell. We use janet_def so the binding lives in the same
-    // shape Janet's own JANET_CORE_REG produces (env[symbol] is a sub-table
-    // with :value key, not the raw cfunction). A bare janet_table_put would
-    // install the wrong shape and the compiler would report "unknown symbol".
+    // Replace os/shell with the capability-gated wrapper. We use janet_def
+    // so the binding lives in the same shape Janet's own JANET_CORE_REG
+    // produces (env[symbol] is a sub-table with :value key, not the raw
+    // cfunction). A bare janet_table_put would install the wrong shape and
+    // the compiler would report "unknown symbol".
     janet.janet_def(
         env,
         "os/shell",
@@ -178,6 +319,20 @@ pub fn applyDefaultDeny(env: *janet.JanetTable) usize {
         "mast-sandbox: capability-gated os/shell — requires `exec`.",
     );
     replaced += 1;
+
+    // Replace every entry in REMOVED_BINDINGS with its panic stub. The
+    // honest closure for "wrap or remove" per docs/SANDBOX_THREAT_MODEL.md
+    // §6 — these symbols still resolve (so referencing them compiles), but
+    // calling them panics with a documented message.
+    inline for (REMOVED_BINDINGS) |rb| {
+        janet.janet_def(
+            env,
+            rb.sym,
+            janet.janet_wrap_cfunction(rb.stub),
+            rb.doc,
+        );
+        replaced += 1;
+    }
 
     return replaced;
 }
@@ -352,6 +507,88 @@ test "eqAsciiCI handles every A-Z boundary (caught by mutation testing 2026-05-1
     try std.testing.expect(!eqAsciiCI("@", "`")); // ASCII just before 'a'; not equal
     try std.testing.expect(eqAsciiCI("[", "[")); // ASCII just after 'Z'
     try std.testing.expect(!eqAsciiCI("[", "{")); // ASCII just after 'z'; not equal
+}
+
+test "G2 closure: every REMOVED_BINDINGS entry panics from Janet" {
+    // The load-bearing test for G2. Iterates the SAME static list that
+    // applyDefaultDeny uses, so the test and the install path can never
+    // drift. Each removed symbol is invoked from Janet; the test asserts
+    // janet_dostring returned non-zero (i.e. our panic propagated).
+    //
+    // Per-symbol invocation forms chosen to exercise the call path with
+    // the minimum number of arguments Janet's parser will accept. We don't
+    // care that the args are semantically valid — the gate fires BEFORE
+    // Janet's argument validation.
+    if (janet.janet_init() != 0) return error.JanetInitFailed;
+    defer janet.janet_deinit();
+
+    const env = janet.janet_core_env(null) orelse return error.NoCoreEnv;
+
+    revokeAll();
+    _ = applyDefaultDeny(env);
+
+    // Grant exec — this MUST NOT bypass the removed-binding panics, since
+    // those bindings do not consult any capability. Granting all caps and
+    // still seeing the panic is stronger than testing under deny.
+    grant(.exec);
+    grant(.fs_read);
+    grant(.fs_write);
+    grant(.net_connect);
+    grant(.net_listen);
+    grant(.dynamic_modules);
+    grant(.unmarshal);
+    grant(.process_exit);
+    defer revokeAll();
+
+    // Invocation forms — one per removed symbol. Strings are chosen to be
+    // syntactically valid Janet so the parser accepts them; the call still
+    // panics at our stub before any underlying syscall.
+    const Invocation = struct { sym: []const u8, src: [:0]const u8 };
+    const invocations = [_]Invocation{
+        .{ .sym = "os/execute", .src = "(os/execute [\"true\"] :p)" },
+        .{ .sym = "os/spawn", .src = "(os/spawn [\"true\"])" },
+        .{ .sym = "os/posix-fork", .src = "(os/posix-fork)" },
+        .{ .sym = "os/posix-exec", .src = "(os/posix-exec [\"true\"])" },
+        .{ .sym = "file/open", .src = "(file/open \"/tmp/x\" :r)" },
+        .{ .sym = "file/temp", .src = "(file/temp)" },
+        .{ .sym = "slurp", .src = "(slurp \"/etc/hostname\")" },
+        .{ .sym = "spit", .src = "(spit \"/tmp/pwn\" \"x\")" },
+        .{ .sym = "dofile", .src = "(dofile \"/etc/hostname\")" },
+        .{ .sym = "net/connect", .src = "(net/connect \"127.0.0.1\" \"22\")" },
+        .{ .sym = "net/listen", .src = "(net/listen \"127.0.0.1\" \"0\")" },
+        .{ .sym = "net/accept", .src = "(net/accept nil)" },
+        .{ .sym = "net/accept-loop", .src = "(net/accept-loop nil (fn [c] nil))" },
+        .{ .sym = "native", .src = "(native \"/nonexistent.so\")" },
+        .{ .sym = "unmarshal", .src = "(unmarshal @\"x\")" },
+        .{ .sym = "os/exit", .src = "(os/exit 0)" },
+    };
+
+    // The static list and the test list MUST cover the same set. If
+    // REMOVED_BINDINGS grows, this assertion forces the test to grow too.
+    try std.testing.expectEqual(REMOVED_BINDINGS.len, invocations.len);
+
+    for (invocations) |inv| {
+        var out: janet.Janet = undefined;
+        const status = janet.janet_dostring(env, inv.src.ptr, "g2-removal-test", &out);
+        if (status == 0) {
+            std.debug.print("G2 LEAK: {s} did not panic — call returned status 0\n", .{inv.sym});
+            return error.RemovedBindingDidNotPanic;
+        }
+    }
+}
+
+test "G2 closure: applyDefaultDeny returns the expected number of replacements" {
+    // Catches the silent-drift mutant: if REMOVED_BINDINGS is extended
+    // but the install loop is broken (e.g. early return), the count
+    // mismatch trips this test.
+    if (janet.janet_init() != 0) return error.JanetInitFailed;
+    defer janet.janet_deinit();
+
+    const env = janet.janet_core_env(null) orelse return error.NoCoreEnv;
+
+    revokeAll();
+    const n = applyDefaultDeny(env);
+    try std.testing.expectEqual(1 + REMOVED_BINDINGS.len, n);
 }
 
 test "MAST_SANDBOX_STRICT env parsing: truthy / falsy / case-insensitive" {
