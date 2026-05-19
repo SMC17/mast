@@ -29,13 +29,19 @@ substrate until both gates above close.
 
 | component                                | proof level                                       | evidence                                                                                                                                                       |
 |------------------------------------------|---------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Sandbox capability model (`os/shell` + `stax-bash` gated; G2 residuals removed) | `audited` + `unit-tested`                          | `docs/SANDBOX_THREAT_MODEL.md` is the self-applied audit; `src/sandbox.zig` ships 8 in-source tests covering deny + grant + argc-bounds + ASCII-CI compare + every removed-binding panics from Janet (drift-proof against the static `REMOVED_BINDINGS` list) |
+| Sandbox capability model (`os/shell` + `stax-bash` gated; 31 dangerous bindings removed) | `audited` + `unit-tested`                          | `docs/SANDBOX_THREAT_MODEL.md` is the self-applied audit; `src/sandbox.zig` ships 9 in-source tests covering deny + grant + argc-bounds + ASCII-CI compare + every removed-binding panics from Janet (drift-proof against the static 31-entry `REMOVED_BINDINGS` list) + deny-observer fires for every category |
 | Sandbox mechanism — capability check     | `audited` (mutation-proven)                       | `tools/mutation-test.sh` M01 — the `g_sandbox.has(.exec)` sense flip — is KILLED; the load-bearing security check is mutation-resistant                       |
+| Sandbox-deny audit routing               | `unit-tested`                                     | `sandbox.g_deny_observer` callback fires BEFORE `janet_panicf`; `main.zig::onSandboxDeny` routes events to `SessionAudit` as `sandbox-deny` records with category tag (closes threat-model §6 residual #9) |
+| Host-cfunction regression discipline     | `audited` + `tooled`                              | `tools/cfunction-audit.sh` enumerates every `janet_def`-registered cfunction and FAILS if any touches `libc.system`/`popen`/`exec`/`fork` without a capability check; wired into `zig build test` (closes residual #10); current scan: 15 cfunctions, 3 gated, 12 benign, 0 violations |
 | `MAST_SANDBOX_STRICT` env var            | `posture-observable-end-to-end`                   | `tests/strict_mode_integration.sh` 5/5 cases against the built binary; one in-source env-parser test (`strictModeFromEnv`); README §Security/Sandbox documents |
-| Buffer protocol (`fromBytes` / `append` / `setContents`) | `unit-tested`                                     | 6 in-source tests in `src/buffer.zig` covering round-trip + dirty-flag + saveAs kind-conversion + partial-EOF mock                                              |
+| Buffer protocol (`fromBytes` / `append` / `setContents`) | `unit-tested`                                     | 6 in-source tests in `src/buffer.zig` covering round-trip + dirty-flag + saveAs kind-conversion + partial-EOF mock + 6 property tests (5000 + 1000 + 1000 + 2000 + 200 + 100 trials)            |
 | File-write / atomic save                 | `unit-tested`                                     | atomic-save unit test in `src/buffer.zig` (tmp + fsync + rename); CI save-round-trip smoke (Linux x86_64 + macOS arm64)                                         |
-| README/code drift                        | `unit-tested`                                     | `tools/doctest.sh` 12/12 PASS against the shipped binary, including the 5/5 `MAST_SANDBOX_STRICT` integration cases it delegates to                            |
-| Mutation surface                         | `audited`                                         | `tools/mutation-test.sh` 8/10 killed after M09 read-loop closure; 2 survivors classified honestly as equivalent mutants (M08 fd-zero, M10 mark-clamp no-op)    |
+| Multi-buffer ring                        | `posture-observable-end-to-end`                   | `tools/doctest.sh` verifies empty-ring → new-buffer alpha → new-buffer beta → list-buffers reports "buffers (2)" → switch-buffer 0 → buffer-name = alpha → next-buffer → buffer-name = beta cycle |
+| Agent-as-buffer (sync `agent/run`)       | `posture-observable-end-to-end`                   | `tools/doctest.sh` verifies `(agent/run "echo …")` returns new buffer index AND captures cmd stdout into a `:agent` buffer renderable via `M-x display`        |
+| Agent-as-buffer (async `agent/spawn` + live-tail) | `posture-observable-end-to-end`            | `tools/doctest.sh` verifies `(agent/spawn cmd)` → handle int, `(agent/wait h)` → exit-status int, `(agent/alive? h)` → false after exit, captured stdout reaches the `:agent` buffer; `agent/wait` uses `poll(2)` on stdout_fd with 500ms backstop (closes §6 residual #8) |
+| ANSI/termios TUI (`--tui`)               | `posture-observable-end-to-end`                   | `tools/doctest.sh` verifies `mast --tui <file>` exits 0 on 'q' AND emits the alt-screen-enter ANSI escape (1049h); in-source compile-check test in `src/tui.zig` |
+| README/code drift                        | `unit-tested`                                     | `tools/doctest.sh` 25/25 PASS against the shipped binary, including the 5/5 `MAST_SANDBOX_STRICT` integration cases it delegates to, the multi-buffer lifecycle, agent/run + agent/spawn cycles, --tui launch, and G2 panic observability |
+| Mutation surface                         | `audited`                                         | `tools/mutation-test.sh` 8/10 killed; 2 survivors classified honestly as equivalent mutants (M08 fd-zero, M10 mark-clamp no-op); no new survivors emerged from the v1.3.x sandbox extensions |
 | Cross-platform build                     | `compiled` (CI only)                              | CI matrix on Linux x86_64 + macOS arm64 with Zig 0.16.0                                                                                                        |
 
 ## Gates that would justify a stronger claim
@@ -79,7 +85,10 @@ substrate until both gates above close.
 - **G4 — Independent security review.** A second pair of eyes on
   `src/sandbox.zig` + `docs/SANDBOX_THREAT_MODEL.md`, ideally someone
   who has shipped capability-based isolation in production. Status:
-  `NOT YET CLOSED`.
+  `NOT YET CLOSED`. The internal hostile-reviewer audit
+  (`docs/SANDBOX_THREAT_MODEL.md` self-applied + the mutation-test
+  surface + the `cfunction-audit.sh` static check) is the strongest
+  current substitute, but is not a substitute for external eyes.
 - **G5 — Zig 1.0 reaches stable.** The language-level guarantee that
   makes the v1.x tag mean what it says in any other ecosystem.
   Status: `NOT YET CLOSED` (out of this repo's control).
