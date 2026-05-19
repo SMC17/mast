@@ -6,6 +6,57 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.3.3 — per-row damage tracker + sandbox property tests + Janet quota primitive identified (2026-05-19)
+
+Three substrate-level additions on top of v1.3.2.
+
+**1. Per-row TUI damage tracking.** `tui.diff_rows(state, allocator,
+current, out_changed)` splits the rendered frame on `\r\n` boundaries
+and returns the indices of rows that changed since the previous frame.
+Pure — no stdout side-effect (same isolation discipline that fixed the
+v1.3.2 FrameState test deadlock). The v1.3.2 frame-level
+`emit_with_damage` path is unchanged; per-row is opt-in for callers
+that want row-granular emission on large terminals. Three new tests
+(first-call-all-changed, single-row-mutation produces single-row
+emit, invalidate forces all rows). Closes the v1.3.2
+§honest-residuals "per-row TUI damage tracking" target.
+
+**2. Sandbox property tests.** Three new property-based tests in
+`src/sandbox.zig` raise mutation surface coverage beyond the
+example-based G2 closure test:
+
+- Grant idempotency (5000 trials): any 0–50 random grants preserve
+  the bit-field invariant.
+- revokeAll empties (1000 trials): after revokeAll no Capability
+  variant is held, regardless of grant history.
+- REMOVED_BINDINGS panic-invariance under random cap sets (200 trials
+  × 9 probe symbols = 1800 Janet invocations): every removed binding
+  panics regardless of which capabilities are granted. Catches the
+  highest-leverage regression: a future code change accidentally
+  routes a removed binding through a cap check (which the example G2
+  test wouldn't catch — it grants all caps; this test randomizes).
+
+**3. Janet resource-quota primitive identified.** The threat model
+§6 #8 previously said "needs a Janet fiber-level interrupt primitive
+we have not designed yet." Wrong — Janet exports
+`janet_interpreter_interrupt(JanetVM *vm)` + `JANET_SIGNAL_INTERRUPT`
+in `vendored/janet/janet.h` lines 1524–2072, plus `janet_addtimeout`
+for event-loop fibers. v0.3.x implementation path now documented:
+SIGALRM handler + `libc.alarm(N)` around each `janet_dostring` call.
+Not implemented in v1.3.3 — design pending — but the substrate now
+knows the primitive exists.
+
+**4. examples/init.janet** expanded from 28 → 110 lines covering
+the full v1.3.x cfunction surface: stax-fleet bridges, buffer
+introspection, agent-as-buffer (sync + async with parallel-three
+demo), sandbox-posture probes, composite session-brief verb. New
+users now have a copy-pasteable starting point. Doctest still
+25/25 (hello pin preserved).
+
+Tests: **42/42 in-source** (12 buffer + 18 tui-with-transitive-buffer
++ 12 sandbox, was 39; +3 sandbox property), 25/25 doctest, 5/5 strict
+integration, 0/16 cfunction-audit violations, 8/10 mutation-test.
+
 ### v1.3.2 — agent/kill + TUI damage tracker (2026-05-19)
 
 Two more v1.3.0 honest-residuals closed:

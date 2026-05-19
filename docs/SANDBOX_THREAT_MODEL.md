@@ -350,8 +350,20 @@ than hide them. **Items #1–5 of the prior version are CLOSED by G2
    gates.
 8. **No resource quotas.** A pathological Janet script can spin a tight
    `(while true)` loop, fill the heap with a `(repeat 1e9 ...)`, or open
-   thousands of fds. v0.3+ territory; requires a Janet fiber-level
-   interrupt primitive we have not designed yet.
+   thousands of fds. **Primitive identified 2026-05-19:** Janet exports
+   `janet_interpreter_interrupt(JanetVM *vm)` and `JANET_SIGNAL_INTERRUPT`
+   in `vendored/janet/janet.h` lines 1524–1548 + 2071–2072, plus
+   `janet_addtimeout(double sec)` for event-loop-resident fibers
+   (line 1570–1573). The v0.3.x implementation path is: install a
+   SIGALRM handler that calls `janet_interpreter_interrupt(janet_vm)`;
+   arm `libc.alarm(MAX_SEC)` before each `janet_dostring` call in
+   `run_repl` / `cmd_agent_run`; disarm after return. The fiber
+   running the user form gets cancelled with the documented "fiber
+   was interrupted" error. **Status:** primitive available, design
+   pending. Not implemented in v1.3.x because mast does NOT use
+   Janet's event loop today (we use synchronous `janet_dostring`);
+   the alarm + interrupt path works synchronously without enabling
+   the full event loop.
 9. **No audit-log routing of deny / removed-binding events.** Today's
    gated wrapper and the removed-binding panic stubs `janet_panicf` on
    trigger; the panic message goes through Janet's normal stacktrace
