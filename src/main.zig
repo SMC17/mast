@@ -449,6 +449,40 @@ fn cmd_agent_count(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     return janet.janet_wrap_integer(@intCast(g_agents.items.len));
 }
 
+/// `(agent/kill handle)` — send SIGTERM to the agent's process. Best-effort:
+/// returns true if the signal was sent, false if the handle is invalid or
+/// already closed. Does NOT reap — call `(agent/wait handle)` after to
+/// collect the exit status and close the stdout_fd. Gated on `exec` since
+/// signaling a child process you started is part of the same capability.
+fn cmd_agent_kill(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (!sandbox.g_sandbox.has(.exec)) {
+        janet.janet_panicf("mast.sandbox: agent/kill denied — `exec` capability not granted (default-deny)");
+    }
+    if (argc != 1) {
+        janet.janet_panicf("agent/kill: expected 1 integer argument (handle), got %d", argc);
+    }
+    var handle_id_i32: i32 = -1;
+    const t = janet.janet_type(argv[0]);
+    if (t == janet.JANET_NUMBER) {
+        handle_id_i32 = janet.janet_unwrap_integer(argv[0]);
+    } else if (t == janet.JANET_STRING) {
+        const s_ptr = janet.janet_unwrap_string(argv[0]);
+        const len = janet.janet_string_length(s_ptr);
+        const bytes = @as([*]const u8, @ptrCast(s_ptr))[0..@intCast(len)];
+        handle_id_i32 = std.fmt.parseInt(i32, bytes, 10) catch -1;
+    }
+    if (handle_id_i32 < 0) return janet.janet_wrap_false();
+    const hid: usize = @intCast(handle_id_i32);
+    if (hid >= g_agents.items.len) return janet.janet_wrap_false();
+    const h = &g_agents.items[hid];
+    if (h.closed) return janet.janet_wrap_false();
+    const rc = libc.kill(@intCast(h.pid), libc.SIGTERM);
+    if (g_audit) |a| {
+        a.write("agent-kill", .{ .handle = hid, .pid = h.pid, .signal = "SIGTERM", .rc = rc }) catch {};
+    }
+    return if (rc == 0) janet.janet_wrap_true() else janet.janet_wrap_false();
+}
+
 /// `(agent/alive? handle)` — boolean, true if handle exists and is unclosed.
 fn cmd_agent_alive(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     if (argc != 1) return janet.janet_wrap_false();
@@ -977,6 +1011,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     janet.janet_def(env, "agent/wait", janet.janet_wrap_cfunction(cmd_agent_wait), "(agent/wait handle) — block until agent exits, return exit status.");
     janet.janet_def(env, "agent/count", janet.janet_wrap_cfunction(cmd_agent_count), "(agent/count) — number of registered agent handles.");
     janet.janet_def(env, "agent/alive?", janet.janet_wrap_cfunction(cmd_agent_alive), "(agent/alive? handle) — true if handle exists and is unclosed.");
+    janet.janet_def(env, "agent/kill", janet.janet_wrap_cfunction(cmd_agent_kill), "(agent/kill handle) — SIGTERM the agent process; returns bool. Requires `exec`.");
 
     // Install capability-gated wrappers over Janet's stdlib dangerous
     // bindings. The MECHANISM is default-deny at the binding boundary;
@@ -1111,11 +1146,22 @@ fn run_tui(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) !
     var minibuffer_len: usize = 0;
     var in_mx_mode = false;
 
+    // Damage-tracker state: render into `frame`, diff against the last
+    // emit via `frame_state`. Closes the v1.3.0 "full-redraw per keystroke"
+    // residual — repeated no-op keystrokes (eg. cycling past EOF, pressing
+    // a key the TUI doesn't bind) no longer cost a screen-rewrite.
+    var frame_state = tui.FrameState{};
+    defer frame_state.deinit(allocator);
+    var frame: std.ArrayList(u8) = .empty;
+    defer frame.deinit(allocator);
+
     while (true) {
         const cur = currentBuffer();
         const total = g_buffers.items.len;
         const minibuffer_slice: ?[]const u8 = if (in_mx_mode) minibuffer_buf[0..minibuffer_len] else null;
-        tui.render(cur, scroll, g_current_index, total, minibuffer_slice);
+        frame.clearRetainingCapacity();
+        tui.render_to_buf(&frame, allocator, cur, scroll, g_current_index, total, minibuffer_slice);
+        _ = tui.emit_with_damage(&frame_state, allocator, frame.items);
 
         const k = tui.readKey();
         const k_int = @intFromEnum(k);
