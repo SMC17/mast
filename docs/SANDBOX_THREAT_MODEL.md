@@ -121,8 +121,8 @@ act, not an emergent feature.
 | `fs_write`        | `file/open` (w-mode), `spit`, `os/mkdir`, `os/rmdir`, `os/rm`, `os/rename`, `os/touch`, `os/symlink`, `os/link`, `os/chmod` | `file/open` and `spit` REMOVED; ancillary `os/*` filesystem mutators still present (v0.3 work) |
 | `net_connect`     | `net/connect`                                                                    | `net/connect` REMOVED |
 | `net_listen`      | `net/listen`, `net/accept`, `net/accept-loop`                                    | `net/listen`, `net/accept`, `net/accept-loop` REMOVED |
-| `env_read`        | `os/getenv`, `os/environ`                                                        | none (out of original G2 scope; tracked as v0.3 residual) |
-| `env_write`       | `os/setenv`                                                                      | none (out of original G2 scope) |
+| `env_read`        | `os/getenv`, `os/environ`                                                        | `os/getenv`, `os/environ` REMOVED 2026-05-19 (v0.2.1; residual #6 closure) |
+| `env_write`       | `os/setenv`                                                                      | `os/setenv` REMOVED 2026-05-19 (v0.2.1; residual #6 closure) |
 | `dynamic_modules` | `native`, `import`-of-native, `module/load`-of-shared-object                     | `native` REMOVED (which also blocks `import` / `module/load` of `.so` since both resolve through `native`); `.janet`-path `import` is blocked transitively because `slurp` is removed |
 | `ffi`             | `ffi/native`, `ffi/lookup`, `ffi/signature`, `ffi/jitfn`                         | none today; the vendored Janet build does not compile in JANET_EV-style FFI, so this row is largely theoretical — re-audit when the build config changes |
 | `unmarshal`       | `unmarshal`                                                                      | `unmarshal` REMOVED |
@@ -335,19 +335,19 @@ than hide them. **Items #1–5 of the prior version are CLOSED by G2
 5. ~~**No `os/exit` gating.**~~ **CLOSED 2026-05-19:** `os/exit` removed
    via panic stub. Host controls process lifecycle.
 
-**Residual gaps still present in v0.2:**
+**Residual gaps still present in v0.2.1:**
 
-6. **No environment-variable gating.** `(os/getenv "AWS_SECRET_ACCESS_KEY")`
-   succeeds today. NOT in the original G2 scope; tracked for v0.3 with
-   `env_read` / `env_write` capability gates against the existing
-   capability vocabulary.
-7. **Ancillary filesystem-metadata bindings.** `os/stat`, `os/lstat`,
-   `os/dir`, `os/realpath`, `os/readlink`, `os/mkdir`, `os/rmdir`,
-   `os/rm`, `os/rename`, `os/touch`, `os/symlink`, `os/chmod`. These
-   give partial filesystem visibility / mutation without going through
-   the primary read/write path. Lower blast than file/open + slurp/spit
-   (no content read or large write), but a script can still enumerate
-   the user's home directory or `chmod 777` a file. v0.3.
+6. ~~**No environment-variable gating.**~~ **CLOSED 2026-05-19 (v0.2.1):**
+   `os/getenv`, `os/setenv`, `os/environ` removed via panic stubs.
+   `(os/getenv "AWS_SECRET_ACCESS_KEY")` now panics with the documented
+   removed-env message. v0.3 may add a host-bound allowlisted
+   `(env/get "KEY_NAME")` cfunction with explicit per-key grants.
+7. ~~**Ancillary filesystem-metadata bindings.**~~ **CLOSED 2026-05-19
+   (v0.2.1):** `os/stat`, `os/lstat`, `os/dir`, `os/realpath`,
+   `os/readlink`, `os/mkdir`, `os/rmdir`, `os/rm`, `os/rename`,
+   `os/touch`, `os/symlink`, `os/chmod` all removed via panic stubs.
+   v0.3 will reintroduce granted paths via per-path-prefix capability
+   gates.
 8. **No resource quotas.** A pathological Janet script can spin a tight
    `(while true)` loop, fill the heap with a `(repeat 1e9 ...)`, or open
    thousands of fds. v0.3+ territory; requires a Janet fiber-level

@@ -6,6 +6,84 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### agent/spawn async + live-tail — 2026-05-19 (v0.3 of agent-as-buffer)
+
+The synchronous `(agent/run cmd)` shipped earlier today has a non-blocking
+sibling: `(agent/spawn cmd)` returns a handle id immediately, and the
+:agent buffer accumulates stdout (and stderr) as `(agent/poll handle)` is
+called. The full surface:
+
+| Form | Behavior |
+|------|----------|
+| `(agent/spawn cmd)` | fork+exec `/bin/sh -c <cmd>` with non-blocking stdout+stderr pipe; create :agent buffer; return handle id |
+| `(agent/poll handle)` | drain pipe → buffer; return exit status int if exited, nil if still running |
+| `(agent/wait handle)` | block until exit (10ms poll loop); return exit status |
+| `(agent/count)` | number of registered handles |
+| `(agent/alive? handle)` | true if handle exists and is unclosed |
+
+Lifecycle invariants:
+- Handle id is the index into `g_agents`; never reused, never reordered.
+- The :agent buffer at `h.buffer_idx` is owned by the buffer ring; the
+  handle holds an index, not a pointer (the ArrayList could relocate on grow).
+- `h.stdout_fd` is closed exactly once — when the child exits AND poll
+  observes the exit (tracked by `h.closed`).
+- Zombie reaping: `waitpid(WNOHANG)` runs on every poll; `agent/wait` loops
+  polling + 10ms sleeps. Process exit reaps any still-running children
+  with `SIGTERM` + final `waitpid` for cleanup.
+
+Smoke-test evidence (interactive):
+
+```
+(def h (agent/spawn "echo line1 ; sleep 1 ; echo line2 ; sleep 1 ; echo line3"))
+→ 0
+(agent/alive? h)
+→ true
+(agent/poll h)
+→ nil        ; still running
+(agent/wait h)
+→ 0          ; exit status, after ~2 seconds
+display
+── [:agent] echo line1 ; sleep 1 ; echo line2 ; sleep 1 ; echo line3 * ──
+   1  line1
+   2  line2
+   3  line3
+```
+
+Many agents can run in parallel (each spawn returns its own handle). The
+v0.3 surface is the actual "background fleet" foundation the steipete
+frame names — addressable, pollable, composable.
+
+Known gaps for v0.3.x:
+- The poll loop in `agent/wait` is 10ms-sleep, not `poll(2)`-based.
+  v0.3.x will route through real `poll(2)` on stdout_fd + child for
+  better latency under many concurrent agents.
+- No `agent/kill handle` yet (process exit reaps, but no in-session
+  cancellation).
+- No structured handle metadata via `(agent/info handle)` —
+  closed state inferable via `agent/alive?` only.
+
+### Residuals #6 + #7 closure — 2026-05-19 (v0.2.1)
+
+Same `REMOVED_BINDINGS`-pattern closure applied to the two remaining
+named residuals in `docs/SANDBOX_THREAT_MODEL.md` §6.
+
+- **Residual #6 — environment-variable bindings.** `os/getenv`,
+  `os/setenv`, `os/environ` REMOVED. Env vars routinely carry secrets
+  (TOKEN_*, AWS_*, ANTHROPIC_API_KEY); no script-side granted path is
+  honest in v0.2. v0.3 may add a host-bound allowlisted
+  `(env/get "KEY_NAME")` with explicit per-key grants.
+- **Residual #7 — ancillary filesystem-metadata bindings.** `os/stat`,
+  `os/lstat`, `os/dir`, `os/realpath`, `os/readlink`, `os/mkdir`,
+  `os/rmdir`, `os/rm`, `os/rename`, `os/touch`, `os/symlink`,
+  `os/chmod` all REMOVED. Lower blast than the primary read/write
+  path (already removed in G2), but a script could still enumerate
+  the home directory or `chmod 777` a file. v0.3 path-prefix
+  capabilities will reinstate granted paths.
+
+The static `REMOVED_BINDINGS` list grows from 16 → 31 entries; the
+load-bearing test (`G2 closure: every REMOVED_BINDINGS entry panics
+from Janet`) iterates 31/31 invocations. 20/20 tests pass.
+
 ### G2 sandbox closure — 2026-05-19
 
 The "residual ungated Janet surface" originally listed in
