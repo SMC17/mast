@@ -6,6 +6,49 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### G2 sandbox closure — 2026-05-19
+
+The "residual ungated Janet surface" originally listed in
+`docs/SANDBOX_THREAT_MODEL.md` §1 — `os/execute`, `os/spawn`, `file/*`,
+`net/*`, `native`, `unmarshal`, `os/exit` — is closed via the
+"removed from the embedded env" path the threat model itself named as
+a valid closure. Symbols still resolve at Janet compile time, but
+invoking them panics with a documented message naming the symbol and
+pointing at the threat model.
+
+- **Subprocess surface narrowed** to `os/shell` + `stax-bash`, both
+  gated on the `exec` capability. `os/execute`, `os/spawn`,
+  `os/posix-fork`, `os/posix-exec` REMOVED.
+- **File I/O removed:** `file/open`, `file/temp`, `slurp`, `spit`,
+  `dofile`. Host buffer ops (`M-x save` / `M-x save-as` / `M-x append`)
+  are the v0.2 file-I/O interface.
+- **Network removed:** `net/connect`, `net/listen`, `net/accept`,
+  `net/accept-loop`. Host-bound HTTP cfunctions with explicit
+  allowlists are v0.3.
+- **RCE primitives removed:** `native` (which transitively blocks
+  `.so` loading via `import`/`module/load`), `unmarshal`.
+- **Host lifecycle:** `os/exit` REMOVED.
+
+Drift-resistance: the install path (`sandbox.applyDefaultDeny`) and
+the test (`G2 closure: every REMOVED_BINDINGS entry panics from Janet`)
+both iterate the same static `REMOVED_BINDINGS` list — adding a
+removal in one without the other trips CI.
+
+Per-binding panic test runs with **every capability granted** so a
+future regression that accidentally re-routes a removed binding
+through a cap check shows up as a non-panic, not as a deny.
+
+Residual gaps (named for honesty, deferred to v0.3): env-var bindings
+(`os/getenv`/`setenv`/`environ`), ancillary filesystem-metadata
+bindings (`os/stat`/`os/dir`/`os/mkdir`/etc.), resource quotas, audit-log
+routing of deny events, host-cfunction regression discipline.
+
+Tests: **20/20 pass**, including 2 new G2 closure tests
+(`G2 closure: every REMOVED_BINDINGS entry panics from Janet`,
+`G2 closure: applyDefaultDeny returns the expected number of replacements`).
+
+STATUS.md G2 flips from `NOT YET CLOSED` to `CLOSED 2026-05-19`.
+
 ### Honesty correction — 2026-05-15
 
 Prior `v1.0` / `v1.1` / "production-grade hygiene milestone" framing was a
