@@ -107,6 +107,64 @@ fn onSandboxDeny(cat: sandbox.DenyCategory) void {
     }
 }
 
+// ─── Resource quota: SIGALRM + janet_interpreter_interrupt ─────────────
+//
+// Closes the v1.3.0 §honest-residuals "no resource quotas" item using
+// the primitive identified in v1.3.3 (janet_interpreter_interrupt +
+// janet_local_vm in vendored/janet/janet.h lines 2066–2072).
+//
+// How it works:
+//   1. alarm_handler() runs in signal context when SIGALRM fires.
+//      It calls janet_interpreter_interrupt(janet_local_vm()) which
+//      tells the Janet VM to cancel the currently-running fiber at
+//      the next bytecode-op boundary.
+//   2. Before each janet_dostring call, the caller arms libc.alarm(N).
+//      After the call returns or panics, the caller disarms with
+//      libc.alarm(0).
+//   3. The cancelled fiber returns a non-zero status to janet_dostring,
+//      which mast then surfaces as a normal eval error (the audit log
+//      records mx-error with status=1).
+//
+// Configurable via MAST_EVAL_TIMEOUT_SEC env var. Default 30 seconds —
+// enough for most agent-driven workflows, short enough that a
+// (while true) doesn't freeze the editor.
+
+const DEFAULT_EVAL_TIMEOUT_SEC: c_uint = 30;
+var g_eval_timeout_sec: c_uint = DEFAULT_EVAL_TIMEOUT_SEC;
+
+fn alarm_handler(sig: c_int) callconv(.c) void {
+    _ = sig;
+    const vm = janet.janet_local_vm();
+    if (vm != null) janet.janet_interpreter_interrupt(vm);
+}
+
+fn install_eval_timeout(audit: ?*SessionAudit) void {
+    // Read env var override (matches the strict-mode parsing pattern).
+    const raw = libc.getenv("MAST_EVAL_TIMEOUT_SEC");
+    if (raw != null) {
+        const s = std.mem.span(@as([*:0]const u8, @ptrCast(raw.?)));
+        const parsed = std.fmt.parseInt(c_uint, s, 10) catch DEFAULT_EVAL_TIMEOUT_SEC;
+        // Cap at 1 hour as a sanity backstop.
+        g_eval_timeout_sec = if (parsed > 0 and parsed <= 3600) parsed else DEFAULT_EVAL_TIMEOUT_SEC;
+    }
+    // Install the SIGALRM handler. signal(2) is the simplest portable
+    // call; sigaction would give more control over flags but signal is
+    // sufficient for the one-shot alarm-fires-interrupt pattern.
+    _ = libc.signal(libc.SIGALRM, &alarm_handler);
+    if (audit) |a| {
+        a.write("eval-timeout-installed", .{ .seconds = g_eval_timeout_sec }) catch {};
+    }
+}
+
+/// Run a janet_dostring with the resource-quota alarm armed.
+/// Caller owns the c_src lifetime.
+fn janet_dostring_quota(env: *janet.JanetTable, c_src: [*c]const u8, label: [*c]const u8, out: *janet.Janet) c_int {
+    _ = libc.alarm(g_eval_timeout_sec);
+    const status = janet.janet_dostring(env, c_src, label, out);
+    _ = libc.alarm(0);
+    return status;
+}
+
 fn read_strict_env() bool {
     const raw = libc.getenv("MAST_SANDBOX_STRICT");
     if (raw == null) return false;
@@ -962,7 +1020,7 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
         defer allocator.free(c_src);
 
         var out: janet.Janet = undefined;
-        const status = janet.janet_dostring(env, c_src.ptr, "mx", &out);
+        const status = janet_dostring_quota(env, c_src.ptr, "mx", &out);
         if (status != 0) {
             print("  (error: status={d})\n\n", .{status});
             try audit.write("mx-error", .{ .verb = parsed.verb, .status = status });
@@ -1057,6 +1115,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     g_audit = &audit;
 
     try audit.write("sandbox-applied", .{ .replaced = replaced_bindings });
+
+    // Install the resource-quota alarm handler (v1.3.5 — closes the
+    // long-standing §honest-residuals "no resource quotas" item using
+    // janet_interpreter_interrupt + SIGALRM). Configurable via
+    // MAST_EVAL_TIMEOUT_SEC env var; default 30 seconds.
+    install_eval_timeout(&audit);
 
     // HOST POLICY (v1): by default grant `exec` at startup because mast's own
     // first-party verbs (`M-x stax-search`, `M-x stax-dashboard`,
@@ -1405,7 +1469,7 @@ fn load_init_janet(allocator: Allocator, env: *janet.JanetTable, audit: *Session
     contents[len] = 0;
 
     var out: janet.Janet = undefined;
-    const status = janet.janet_dostring(env, @ptrCast(contents.ptr), "init.janet", &out);
+    const status = janet_dostring_quota(env, @ptrCast(contents.ptr), "init.janet", &out);
     if (status != 0) {
         print("init.janet: eval error (status={d})\n", .{status});
         try audit.write("init-janet-error", .{ .path = path, .status = status });
