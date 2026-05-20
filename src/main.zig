@@ -152,8 +152,18 @@ fn onSandboxDeny(cat: sandbox.DenyCategory) void {
 const DEFAULT_EVAL_TIMEOUT_SEC: c_uint = 30;
 var g_eval_timeout_sec: c_uint = DEFAULT_EVAL_TIMEOUT_SEC;
 
+// Count of SIGALRM-driven interrupts that fired since the most recent
+// janet_dostring_quota call. The handler increments via atomic-add;
+// janet_dostring_quota atomically loads + drains the count, calling
+// janet_interpreter_interrupt_handled() once per fire so vm->auto_suspend
+// returns to 0. Without this, even ONE timeout left vm->auto_suspend == 1
+// for the rest of the process, breaking every subsequent eval (round-4
+// adversarial finding #1).
+var g_alarm_fires: c_int = 0;
+
 fn alarm_handler(sig: c_int) callconv(.c) void {
     _ = sig;
+    _ = @atomicRmw(c_int, &g_alarm_fires, .Add, 1, .seq_cst);
     const vm = janet.janet_local_vm();
     if (vm != null) janet.janet_interpreter_interrupt(vm);
 }
@@ -178,10 +188,25 @@ fn install_eval_timeout(audit: ?*SessionAudit) void {
 
 /// Run a janet_dostring with the resource-quota alarm armed.
 /// Caller owns the c_src lifetime.
+///
+/// Round-4 fix: drain the fire-count after the eval returns, calling
+/// janet_interpreter_interrupt_handled once per interrupt that fired so
+/// vm->auto_suspend goes back to 0. Without this, a single timeout
+/// leaves auto_suspend == 1 for the rest of the process and every
+/// subsequent eval interrupts at the first bytecode op.
 fn janet_dostring_quota(env: *janet.JanetTable, c_src: [*c]const u8, label: [*c]const u8, out: *janet.Janet) c_int {
+    @atomicStore(c_int, &g_alarm_fires, 0, .seq_cst);
     _ = libc.alarm(g_eval_timeout_sec);
     const status = janet.janet_dostring(env, c_src, label, out);
     _ = libc.alarm(0);
+    // Drain: call interrupt-handled once per fire so vm->auto_suspend
+    // returns to 0. The atomic load happens-after the alarm(0) disarm
+    // so the count is stable.
+    var fires = @atomicLoad(c_int, &g_alarm_fires, .seq_cst);
+    const vm = janet.janet_local_vm();
+    while (fires > 0) : (fires -= 1) {
+        if (vm != null) janet.janet_interpreter_interrupt_handled(vm);
+    }
     return status;
 }
 
@@ -501,7 +526,21 @@ fn cmd_agent_wait(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     const h = &g_agents.items[hid];
 
     const allocator = std.heap.c_allocator;
+    // Round-4 fix: the wall-clock quota (SIGALRM) only bounds Janet
+    // bytecode; this cfunction's poll loop would otherwise block for
+    // the agent's full lifetime regardless of MAST_EVAL_TIMEOUT_SEC.
+    // Snapshot the fire count at entry; if the handler bumped it during
+    // our poll, the quota fired and we must bail.
+    const entry_fires = @atomicLoad(c_int, &g_alarm_fires, .seq_cst);
     while (!h.closed) {
+        // Check the quota before each iteration so a no-stdout-activity
+        // sleep gets bounded too. The signal handler bumps g_alarm_fires
+        // synchronously when SIGALRM fires.
+        if (@atomicLoad(c_int, &g_alarm_fires, .seq_cst) > entry_fires) {
+            // Quota fired during this cfunction. Surface as the same
+            // panic Janet sees when interrupt_handled hasn't run yet.
+            janet.janet_panicf("agent/wait: interrupted by MAST_EVAL_TIMEOUT_SEC quota");
+        }
         // poll(2) on the stdout fd. Returns when:
         //   - revents & POLLIN: bytes ready → drain
         //   - revents & POLLHUP: pipe write end closed → child likely exited
@@ -649,13 +688,23 @@ fn cmd_agent_run(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     const exit_status = libc.pclose(fp);
 
     // Buffer name = first 64 chars of the command, sanitized for display.
+    // Use the same sanitization policy as sanitizeNameInto (round-4
+    // doctrine convergence: same rules in both sites). Specifically:
+    // preserve high-bit UTF-8 bytes; only strip ESC/BEL/DEL/other C0
+    // control bytes (except \t/\n/\r).
     var name_buf: [80]u8 = undefined;
     const s_len = std.mem.len(s_ptr);
     const name_len = @min(s_len, 64);
-    var i: usize = 0;
-    while (i < name_len) : (i += 1) {
-        const ch = s_ptr[i];
-        name_buf[i] = if (ch >= 0x20 and ch < 0x7f) ch else '?';
+    {
+        var i: usize = 0;
+        while (i < name_len) : (i += 1) {
+            const ch = s_ptr[i];
+            name_buf[i] = switch (ch) {
+                0x09, 0x0a, 0x0d => ch,
+                0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => '?',
+                else => ch,
+            };
+        }
     }
     const name_slice = name_buf[0..name_len];
 
@@ -921,8 +970,11 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
                     print("  (new-buffer add error: {})\n\n", .{e});
                     continue;
                 };
-                print("  → created buffer [{d}] :agent {s}\n\n", .{ new_idx, parsed.args[0] });
-                try audit.write("buffer-create", .{ .name = parsed.args[0], .kind = "agent", .index = new_idx });
+                // Use the already-sanitized `sn` (not raw parsed.args[0]) so
+                // the echo line can't carry ANSI escapes (round-4 finding —
+                // regression of round-2 #3 via a different stdout sink).
+                print("  → created buffer [{d}] :agent {s}\n\n", .{ new_idx, sn });
+                try audit.write("buffer-create", .{ .name = sn, .kind = "agent", .index = new_idx });
                 continue;
             }
             if (std.mem.eql(u8, b.janet_expr, "MAST_DISPLAY_SENTINEL")) {
@@ -1034,9 +1086,13 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
                         try audit.write("mx-saveas-error", .{ .err = @errorName(e), .path = parsed.args[0] });
                         continue;
                     };
+                    // Sanitize the path for the echo + audit line (round-4
+                    // finding — regression of round-2 #3). The on-disk file
+                    // name uses the raw path (the syscalls don't render
+                    // ANSI), but the in-buffer display does.
                     print("  → wrote {d} bytes to {s} (buffer is now :file)\n\n",
-                          .{ n, parsed.args[0] });
-                    try audit.write("buffer-saveas", .{ .path = parsed.args[0], .bytes = n });
+                          .{ n, name_sanitized[0..@min(parsed.args[0].len, name_sanitized.len)] });
+                    try audit.write("buffer-saveas", .{ .path = name_sanitized[0..@min(parsed.args[0].len, name_sanitized.len)], .bytes = n });
                 }
                 continue;
             }
