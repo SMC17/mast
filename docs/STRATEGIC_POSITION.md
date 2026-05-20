@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-13
 **Status:** internal strategy memo, no public push.
-**Reads with:** companion essay `https://sunlitmoon.online/posts/apple-next-pixar-emacs` and architecture sketch `<private-substrate>/SPEC.md`.
+**Reads with:** companion essay `~/blog/content/posts/apple-next-pixar-emacs.md` and architecture sketch `~/mac-mining/editor-substrate/SPEC.md`.
 **Doctrine anchors:** `feedback_no_public_pushes_yet.md`, `feedback_ship_first_redhat_defense.md`, `project_sovereign_hardware_aether.md`, `feedback_no_paid_api_keys.md`.
 
 ---

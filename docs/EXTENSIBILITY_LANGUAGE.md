@@ -2,8 +2,8 @@
 
 **Decision deadline (per SPEC.md §3.2):** Q2 2026.
 **Date of this memo:** 2026-05-13.
-**Status:** decision memo. **AUDITED on both Linux AND Apple Silicon (arm64)** as of 2026-05-13. Linux build: 945 KB stripped, 5/6 criteria pass + valgrind clean. Apple Silicon build: 962 KB Mach-O arm64, all 3 smoke-test checks green (eval round-trip, Zig-fn registration, error-path detection). Janet decision is locked for the substrate's v0.1 commit-zero. See `<private-substrate>/build-tests/janet-zig-smoke/RUN_LOG.md`.
-**Companion:** `<private-substrate>/SPEC.md`, `https://sunlitmoon.online/posts/apple-next-pixar-emacs`.
+**Status:** decision memo. **AUDITED on both Linux AND Apple Silicon (arm64)** as of 2026-05-13. Linux build: 945 KB stripped, 5/6 criteria pass + valgrind clean. Apple Silicon build: 962 KB Mach-O arm64, all 3 smoke-test checks green (eval round-trip, Zig-fn registration, error-path detection). Janet decision is locked for the substrate's v0.1 commit-zero. See `~/mac-mining/editor-substrate/build-tests/janet-zig-smoke/RUN_LOG.md`.
+**Companion:** `~/mac-mining/editor-substrate/SPEC.md`, `~/blog/content/posts/apple-next-pixar-emacs.md`.
 
 ---
 
@@ -116,9 +116,9 @@ The decision is gated on one verification step before commit zero: a build test 
 
 Three checks before the first commit lands. Each is small enough to ship in a day; all three are required.
 
-1. **Janet build test.** Confirm `@cImport(janet.h)` works, native Zig function registration works, eval-and-return cycle works on both Apple Silicon and Linux. Output: a 30-line working sample at `<private-substrate>/build-tests/janet-zig-smoke/`. Budget: half a day.
+1. **Janet build test.** Confirm `@cImport(janet.h)` works, native Zig function registration works, eval-and-return cycle works on both Apple Silicon and Linux. Output: a 30-line working sample at `~/mac-mining/editor-substrate/build-tests/janet-zig-smoke/`. Budget: half a day.
 
-2. **Buffer-protocol binding sketch.** Write 1–2 pages on how Janet sees buffers. The mapping I'd start with: each buffer becomes a Janet table with `:read`, `:write`, `:mark`, `:point`, `:mode`, `:properties` keys whose values are either data or callables. Janet code never touches raw memory; the Zig host owns the buffer storage and exposes accessor callables. Output: `<private-substrate>/buffer-protocol.md`. Budget: 1 day.
+2. **Buffer-protocol binding sketch.** Write 1–2 pages on how Janet sees buffers. The mapping I'd start with: each buffer becomes a Janet table with `:read`, `:write`, `:mark`, `:point`, `:mode`, `:properties` keys whose values are either data or callables. Janet code never touches raw memory; the Zig host owns the buffer storage and exposes accessor callables. Output: `~/mac-mining/editor-substrate/buffer-protocol.md`. Budget: 1 day.
 
 3. **Smallest "M-x command" cycle.** Demonstrate the editor reading user input, dispatching to a Janet-defined command, mutating a buffer, and rendering. Even at terminal-mock level, this proves the command-runner architecture is sound. Output: a working demo binary. Budget: 2 days.
 
