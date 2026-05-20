@@ -6,6 +6,53 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.3.10 — round-5 adversarial review: production-robustness closures (2026-05-19)
+
+Round 5 (`research/2026-05-19-adversarial-review-round5.md`) explicitly
+noted: **"rounds 1-4 + fuzz exhausted the privilege-escalation
+surface; round 5's findings are production-robustness, NOT 'no-escape'
+claims."** Net-new escalation paths: **zero**. v1.3.10 closes 4 of
+round 5's 5 findings; #30 is named as honest residual with v1.4
+implementation path.
+
+**Finding #30 — shell-cfunction quota bypass (HONEST RESIDUAL).**
+`gated_os_shell`, `gated_stax_bash`, `cmd_agent_run` all sit on
+`libc.system` / `libc.popen` which swallow EINTR via internal
+`TEMP_FAILURE_RETRY` `waitpid`. SIGALRM fires, handler bumps
+`g_alarm_fires`, but the VM is parked in the cfunction — interrupt
+only takes effect when bytecode resumes after the shell exits. PoC:
+`(os/shell "sleep 9999")` blocks for 9999 seconds despite quota.
+**v1.4 path:** replace `libc.system` / `popen` in all three sites
+with `fork`+`execv`+poll+waitpid bounded by `g_alarm_fires` (mirror
+the `cmd_agent_wait` pattern; ~50 lines per site × 3 sites).
+**Severity:** liveness, not security. Documented in §6 #30.
+
+**Finding #31 — `g_alarm_fires` TOCTOU.** CLOSED. `janet_dostring_quota`
+now uses `@atomicRmw(.Xchg, 0)` to atomically read-and-zero the
+counter; any SIGALRM that delivers after the Xchg is credited to the
+NEXT dostring's counter.
+
+**Finding #32 — `janet_panicf` longjmps past Zig `defer` (structural
+class).** CLOSED. Removed `defer allocator.free(cmd_z)` in
+`cmd_agent_spawn`; removed `defer captured.deinit(allocator)` in
+`cmd_agent_run`. Each panic site + happy path deinit explicitly.
+Both functions carry the doctrine comment: **no Zig `defer` in any
+cfunction reachable by `janet_panicf`.**
+
+**Finding #33 — `cmd_agent_wait` quota-panic leak.** CLOSED. Before
+panicking on quota interrupt, the cfunction now SIGTERM's the child,
+closes stdout, blocking-reaps via waitpid, marks `h.closed`, sets
+`h.exit_status = -1`, writes an `agent-wait-quota-interrupt` audit
+event. No more leaks per interrupt.
+
+**Finding #34 — `agentDrain` iteration cap.** CLOSED. Cap of 256
+iterations (~1 MB per drain call) as defense-in-depth. NONBLOCK fd +
+~64KB pipe buffer already bound this in practice.
+
+**Tests:** 49/49 in-source + 6/6 quota integration + 25/25 doctest +
+5/5 strict-mode + sandbox-fuzz clean + cfunction-audit 0 violations
++ 8/10 mutation.
+
 ### v1.3.9 — round-4 adversarial review: bugs in MY OWN fix code (2026-05-19)
 
 Round 4 of self-applied hostile review against post-v1.3.8 mast found

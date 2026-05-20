@@ -532,6 +532,55 @@ implementations + 1 regression of round-2 #3. All closed.
     (v1.3.9):** converged on the looser policy (case-by-case switch
     that preserves UTF-8, strips only control bytes).
 
+**v1.3.10 (2026-05-19) — round-5 adversarial review.** Round 5
+(`research/2026-05-19-adversarial-review-round5.md`) explicitly noted
+"rounds 1-4 + fuzz exhausted the privilege-escalation surface; round
+5's findings are production-robustness, NOT 'no-escape' claims."
+Net-new escalation paths: **zero**. v1.3.10 closes 4 of round 5's 5
+findings; #30 (shell-cfunction quota propagation) is named as an
+honest residual with v1.4 implementation path.
+
+30. **Shell-cfunction quota bypass (honest residual).** `gated_os_shell`,
+    `gated_stax_bash`, and `cmd_agent_run` block in `libc.system` /
+    `libc.popen`+`fread`. glibc's `system(3)` is TEMP_FAILURE_RETRY
+    style — its internal `waitpid` swallows EINTR. SIGALRM bumps
+    `g_alarm_fires` and calls `janet_interpreter_interrupt`, but the
+    VM is parked in the cfunction; the interrupt only takes effect
+    when bytecode resumes (after the shell exits).
+    PoC (`MAST_EVAL_TIMEOUT_SEC=2`):
+    `(os/shell "sleep 9999")` blocks for 9999 seconds despite quota.
+    Round-4 #2 fixed `cmd_agent_wait` only; these three sibling
+    sites were missed. **v1.4 path:** replace `libc.system` / `popen`
+    in all three sites with `fork`+`execv`+`poll`-on-stdout +
+    `waitpid(WNOHANG)` loop bounded by `g_alarm_fires`, mirroring the
+    `cmd_agent_wait` pattern. ~50 lines per site × 3 sites.
+    **Severity:** Liveness, not security. Exec-holding callers can
+    DoS the editor; no-exec callers are already gated out.
+31. ~~**`g_alarm_fires` TOCTOU between `alarm(0)` and atomic load.**~~
+    **CLOSED 2026-05-19 (v1.3.10):** `janet_dostring_quota` now uses
+    `@atomicRmw(.Xchg)` to read-and-zero in a single operation. Any
+    SIGALRM that delivers after the Xchg is credited to the NEXT
+    dostring's counter; we drain exactly what we atomically observed.
+32. ~~**`janet_panicf` longjmps past Zig `defer` — cfunctions leak
+    on panic.**~~ **CLOSED 2026-05-19 (v1.3.10):** removed `defer
+    allocator.free(cmd_z)` in `cmd_agent_spawn` (now free explicitly
+    after fork; each panic site frees independently). Removed
+    `defer captured.deinit(allocator)` in `cmd_agent_run` (each
+    panic site + happy path deinit explicitly; `buf` is also deinited
+    if `addBuffer` fails). Doctrine documented in both functions:
+    **no Zig `defer` in any cfunction reachable by `janet_panicf`.**
+33. ~~**`cmd_agent_wait` quota-panic left agent unreaped + fd
+    unclosed.**~~ **CLOSED 2026-05-19 (v1.3.10):** before panicking
+    on quota interrupt, the cfunction now best-effort SIGTERM's the
+    child, closes the stdout fd, blocking-reaps via waitpid, marks
+    `h.closed = true`, sets `h.exit_status = -1`, and writes an
+    `agent-wait-quota-interrupt` audit event. No more leaks per
+    quota interrupt.
+34. ~~**`agentDrain` had no iteration cap.**~~ **CLOSED 2026-05-19
+    (v1.3.10):** iteration cap of 256 (≈ 1 MB per drain call).
+    Defense-in-depth — the NONBLOCK fd + ~64KB pipe buffer already
+    bound this in practice (~16 iterations max).
+
 ---
 
 ## 7. Out of scope for v1

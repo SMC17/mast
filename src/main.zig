@@ -199,10 +199,13 @@ fn janet_dostring_quota(env: *janet.JanetTable, c_src: [*c]const u8, label: [*c]
     _ = libc.alarm(g_eval_timeout_sec);
     const status = janet.janet_dostring(env, c_src, label, out);
     _ = libc.alarm(0);
-    // Drain: call interrupt-handled once per fire so vm->auto_suspend
-    // returns to 0. The atomic load happens-after the alarm(0) disarm
-    // so the count is stable.
-    var fires = @atomicLoad(c_int, &g_alarm_fires, .seq_cst);
+    // Round-5 #2 fix: atomicRmw .Xchg swaps the count to 0 in a single
+    // operation. A SIGALRM whose kernel timer expired BEFORE alarm(0)
+    // but delivered AFTER alarm(0) (queued in the signal-delivery path)
+    // would, with a plain atomicLoad + 0-store sequence, leak one
+    // auto_suspend. With Xchg, any post-Xchg fire is credited to the
+    // NEXT dostring's counter; we drain exactly what we observed.
+    var fires = @atomicRmw(c_int, &g_alarm_fires, .Xchg, 0, .seq_cst);
     const vm = janet.janet_local_vm();
     while (fires > 0) : (fires -= 1) {
         if (vm != null) janet.janet_interpreter_interrupt_handled(vm);
@@ -321,7 +324,12 @@ fn agentDrain(allocator: Allocator, h: *AgentHandle) usize {
     if (h.buffer_idx >= g_buffers.items.len) return 0;
     var total: usize = 0;
     var chunk: [4096]u8 = undefined;
-    while (true) {
+    // Round-5 #5: iteration cap. NONBLOCK reads from a 64KB pipe buffer
+    // bound this in practice (~16 iterations max), but a hostile peer
+    // could in theory keep filling stdout faster than we drain. Cap at
+    // 256 iterations (1 MB) per drain call as defense-in-depth.
+    var iter: usize = 0;
+    while (iter < 256) : (iter += 1) {
         const n = libc.read(h.stdout_fd, &chunk, chunk.len);
         if (n <= 0) break;
         const slice = chunk[0..@intCast(n)];
@@ -370,12 +378,16 @@ fn cmd_agent_spawn(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     }
 
     // C string for the command (Janet strings are not null-terminated guaranteed).
+    // Round-5 #3 fix: NO `defer` allowed in any cfunction reachable by
+    // janet_panicf — Janet's panic does longjmp which skips Zig defer.
+    // Each panic site frees cmd_z explicitly; the parent also frees it
+    // after the fork() returns (it's only needed by the about-to-execv
+    // child, whose memory image is replaced on execv).
     const cmd_z = allocator.dupeZ(u8, @as([*]const u8, @ptrCast(s_ptr))[0..s_len]) catch {
         _ = libc.close(pipefd[0]);
         _ = libc.close(pipefd[1]);
         janet.janet_panicf("agent/spawn: OOM allocating command string");
     };
-    defer allocator.free(cmd_z);
 
     const child = libc.fork();
     if (child < 0) {
@@ -404,7 +416,13 @@ fn cmd_agent_spawn(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
         libc.exit(127);
     }
 
-    // Parent: close write end, set read end non-blocking, register handle.
+    // Parent: free cmd_z now (child has either exec'd or exited;
+    // execv replaces its memory image so its copy is gone too). This
+    // eliminates the round-5 #3 leak window — we don't rely on Zig
+    // defer that janet_panicf can longjmp past.
+    allocator.free(cmd_z);
+
+    // Close write end, set read end non-blocking, register handle.
     _ = libc.close(pipefd[1]);
     const flags = libc.fcntl(pipefd[0], libc.F_GETFL, @as(c_int, 0));
     _ = libc.fcntl(pipefd[0], libc.F_SETFL, flags | libc.O_NONBLOCK);
@@ -420,6 +438,10 @@ fn cmd_agent_spawn(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
         .buffer_idx = buf_idx,
     }) catch {
         _ = libc.close(pipefd[0]);
+        // Reap the child too, so we don't leak a zombie + pid.
+        _ = libc.kill(child, libc.SIGTERM);
+        var st: c_int = 0;
+        _ = libc.waitpid(child, &st, 0);
         janet.janet_panicf("agent/spawn: failed to register handle");
     };
     const handle_id = g_agents.items.len - 1;
@@ -537,9 +559,22 @@ fn cmd_agent_wait(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
         // sleep gets bounded too. The signal handler bumps g_alarm_fires
         // synchronously when SIGALRM fires.
         if (@atomicLoad(c_int, &g_alarm_fires, .seq_cst) > entry_fires) {
-            // Quota fired during this cfunction. Surface as the same
-            // panic Janet sees when interrupt_handled hasn't run yet.
-            janet.janet_panicf("agent/wait: interrupted by MAST_EVAL_TIMEOUT_SEC quota");
+            // Quota fired during this cfunction. Round-5 #4 fix: before
+            // panicking, best-effort SIGTERM the child + close the fd +
+            // reap so we don't leak an unreaped agent + open fd per
+            // quota interrupt. Mark the handle closed so a future
+            // (agent/wait h) returns immediately instead of re-entering
+            // this loop.
+            _ = libc.kill(@intCast(h.pid), libc.SIGTERM);
+            _ = libc.close(h.stdout_fd);
+            var st: c_int = 0;
+            _ = libc.waitpid(@intCast(h.pid), &st, 0); // blocking reap
+            h.closed = true;
+            h.exit_status = -1; // -1 = killed by quota
+            if (g_audit) |a| {
+                a.write("agent-wait-quota-interrupt", .{ .handle = hid, .pid = h.pid }) catch {};
+            }
+            janet.janet_panicf("agent/wait: interrupted by MAST_EVAL_TIMEOUT_SEC quota (child reaped)");
         }
         // poll(2) on the stdout fd. Returns when:
         //   - revents & POLLIN: bytes ready → drain
@@ -674,7 +709,9 @@ fn cmd_agent_run(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
 
     const allocator = std.heap.c_allocator;
     var captured: std.ArrayList(u8) = .empty;
-    defer captured.deinit(allocator);
+    // Round-5 #3 fix: NO `defer captured.deinit(...)` — janet_panicf
+    // longjmps past Zig defer, leaking the ArrayList. Each panic site
+    // below explicitly deinits captured before panicking.
 
     var chunk: [4096]u8 = undefined;
     while (true) {
@@ -682,6 +719,7 @@ fn cmd_agent_run(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
         if (n == 0) break;
         captured.appendSlice(allocator, chunk[0..n]) catch {
             _ = libc.pclose(fp);
+            captured.deinit(allocator);
             janet.janet_panicf("agent/run: OOM while capturing stdout");
         };
     }
@@ -709,16 +747,28 @@ fn cmd_agent_run(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     const name_slice = name_buf[0..name_len];
 
     const buf = Buffer.fromBytes(allocator, .agent, name_slice, captured.items) catch {
+        captured.deinit(allocator); // round-5 #3 — no defer past panic
         janet.janet_panicf("agent/run: failed to create :agent buffer");
     };
     const new_idx = addBuffer(allocator, buf) catch {
+        // buf was created; deinit it explicitly before panicking so we
+        // don't leak the dup'd name + contents (round-5 #3).
+        var b = buf;
+        b.deinit();
+        captured.deinit(allocator);
         janet.janet_panicf("agent/run: failed to add buffer to ring");
     };
+
+    // Happy path — explicit deinit (no defer past janet_panicf).
+    // Capture the length BEFORE deinit since the items slice goes
+    // invalid after.
+    const captured_len = captured.items.len;
+    captured.deinit(allocator);
 
     if (g_audit) |a| {
         a.write("agent-run", .{
             .index = new_idx,
-            .bytes = captured.items.len,
+            .bytes = captured_len,
             .exit_status = exit_status,
         }) catch {};
     }
