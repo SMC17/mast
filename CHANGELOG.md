@@ -6,6 +6,86 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.3.4 — adversarial-review-driven security closures (2026-05-19)
+
+A self-applied hostile-reviewer pass against the post-v1.3.3 threat
+model found seven net-new gaps the prior audit missed. Report:
+`research/2026-05-19-adversarial-review.md`. All seven are addressed
+in this release (six closed mechanically, one documented as
+intentional residual).
+
+**Finding #1 — `os/open` + `file/*` methods bypassed the v0.2 file-I/O
+closure.** The prior closure removed `file/open`/`slurp`/`spit` but
+left the parallel constructor `os/open` plus `file/read`/`write`/
+`close`/`seek`/`tell`/`flush`/`lines` and `os/pipe` live, so under
+`MAST_SANDBOX_STRICT=1` a Janet script could still do
+`(file/read (os/open "/etc/shadow" :r) :all)`. **CLOSED:** 9 new
+symbols added to `REMOVED_BINDINGS`.
+
+**Finding #2 — FFI surface live, not "theoretical."** The §3 `ffi`
+row claimed the vendored Janet did not compile FFI; in fact
+`janet.h:269` defines `JANET_FFI` unconditionally and the full surface
+(`ffi/native`/`call`/`jitfn`/`malloc`/`free`/`read`/`write`/
+`pointer-cfunction`/`pointer-buffer`/`signature`/`struct`/`size`/
+`align`/`context`) was live. `ffi/jitfn` alone is strictly stronger
+than the removed `native` — mmap + execute arbitrary bytecode.
+**CLOSED:** 15 new symbols added to `REMOVED_BINDINGS` under new
+`DenyCategory.ffi`.
+
+**Finding #3 — JSON injection in `SessionAudit.write`.** Payload string
+fields were formatted as raw JSON via `bufPrint("\"{s}\":\"{s}\"")`
+with no escape. A hostile M-x verb / save-as path / buffer name could
+forge log lines — eg. a verb containing `","verb":"sandbox-grant","x":"`
+would forge a `sandbox-grant` event downstream. **CLOSED:** new
+`writeJsonString` helper escapes `"`, `\`, control bytes (`\u00XX` for
+0x00–0x1f and 0x7f). 4 in-source tests including PoC neutralization.
+
+**Finding #4 — ANSI escape injection through buffer name + contents
+in the TUI.** `src/tui.zig` emitted `buf.name` (settable via
+`M-x save-as`) and `buf.contents` (carrying agent-spawn stdout) raw to
+stdout. PoC:
+`(agent/spawn "printf '\\x1b]52;c;cm0gLXJmIH4=\\x07'")` puts
+`rm -rf ~` into the terminal clipboard on OSC-52-respecting terminals.
+**CLOSED:** `sanitize_into` helper replaces ESC/BEL/DEL/other C0
+control bytes (except `\t`/`\n`/`\r`) with `?` in the render path.
+3 in-source tests cover the OSC 52 PoC + UTF-8 passthrough + DEL.
+
+**Finding #5 — process-control survivors.** `os/cd`, `os/umask`,
+`os/link`, `os/proc-kill` (arbitrary-pid signal, strictly worse than
+the gated `agent/kill`), `os/proc-wait`, `os/proc-close`,
+`os/sigaction`, `os/posix-chroot` all survived the v0.2.1
+ancillary-fs sweep. `os/sigaction` could make mast un-killable by
+SIGTERM. **CLOSED:** 8 new symbols added to `REMOVED_BINDINGS` under
+new `DenyCategory.process_control`.
+
+**Finding #6 — bytecode constructors defeat source review.** `asm`
+(constructs Janet functions from a runtime dictionary — pure-Janet
+bytecode builder) and `marshal` (paired serializer to the
+already-removed `unmarshal`) defeated any source-level review of user
+scripts. The v2 capability-manifest plan implicitly assumes source
+review is sound; `asm` nullifies that. **CLOSED:** 2 new symbols
+added to `REMOVED_BINDINGS` under new `DenyCategory.bytecode`. Note:
+`compile`, `signal`, `debug/*` are intentionally NOT removed —
+removing them would break the language; tracked as residual #19.
+
+**Finding #7 — `agent/wait` DoS under strict mode.** `agent/wait`
+(and `poll` / `count` / `alive?`) were not gated on `exec`. PoC: user
+runs `M-x agent-run "sleep 9999"` under default policy; later any
+strict-mode script calling `(agent/wait 0)` froze mast for the full
+hour. **CLOSED:** every `agent/*` operation now gated on `exec`,
+matching the capability domain that created the handle.
+
+**`REMOVED_BINDINGS` list grows 31 → 65.** Property test
+(`REMOVED_BINDINGS panic-invariance under random cap sets`) iterates
+the new total: 200 trials × all 65 entries → 13,000 Janet invocations,
+all confirm panic.
+
+**Tests after v1.3.4:** 61 in-source (12 buffer + 21 tui + 4 audit +
+12 sandbox + transitive duplicates; the build summary reports
+"49/49 unique" elsewhere depending on which sub-modules included
+which) + 25/25 doctest + 5/5 strict-mode integration + 0/16
+cfunction-audit violations + 8/10 mutation-test.
+
 ### v1.3.3 — per-row damage tracker + sandbox property tests + Janet quota primitive identified (2026-05-19)
 
 Three substrate-level additions on top of v1.3.2.

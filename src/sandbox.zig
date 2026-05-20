@@ -196,6 +196,19 @@ pub const DenyCategory = enum {
     env,
     /// Ancillary filesystem-metadata bindings (os/stat, os/dir, os/mkdir, etc.).
     fs_ancillary,
+    /// FFI surface (ffi/native, ffi/call, ffi/jitfn, etc.) — added 2026-05-19
+    /// after adversarial-review finding #2: §3 row "ffi" claimed the vendored
+    /// Janet build did not compile FFI; in fact `janet.h:269` defines
+    /// `JANET_FFI` unconditionally and the full ffi surface is live.
+    ffi,
+    /// Host process control (os/cd, os/umask, os/link, os/proc-kill,
+    /// os/sigaction, os/posix-chroot, etc.) — added 2026-05-19 after
+    /// adversarial-review finding #5.
+    process_control,
+    /// Bytecode constructors (asm, marshal) — added 2026-05-19 after
+    /// adversarial-review finding #6: `asm` builds Janet functions from
+    /// a runtime dictionary, nullifying source-level review.
+    bytecode,
 };
 
 pub var g_deny_observer: ?*const fn (cat: DenyCategory) void = null;
@@ -337,6 +350,47 @@ fn panic_removed_fs_ancillary(argc: i32, argv: [*c]janet.Janet) callconv(.c) jan
     );
 }
 
+fn panic_removed_ffi(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    observe(.ffi);
+    janet.janet_panicf(
+        "mast.sandbox: FFI bindings are REMOVED in v1.3.4 — " ++
+            "Janet's ffi/ surface (native, call, jitfn) is strictly stronger than " ++
+            "the already-removed `native`: it can call any libc symbol (system, " ++
+            "exec, mmap+execute) bypassing every capability gate. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §3 (ffi row) — corrected 2026-05-19.",
+    );
+}
+
+fn panic_removed_process_control(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    observe(.process_control);
+    janet.janet_panicf(
+        "mast.sandbox: host process-control bindings are REMOVED in v1.3.4 — " ++
+            "os/cd, os/umask, os/link, os/proc-kill, os/proc-wait, os/proc-close, " ++
+            "os/sigaction, os/posix-chroot can alter host process state outside " ++
+            "the mast-managed agent registry. os/proc-kill in particular is " ++
+            "strictly worse than the gated `agent/kill` — arbitrary pid, not " ++
+            "the g_agents registry. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §6 #14 (added 2026-05-19).",
+    );
+}
+
+fn panic_removed_bytecode(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    observe(.bytecode);
+    janet.janet_panicf(
+        "mast.sandbox: bytecode-construction bindings are REMOVED in v1.3.4 — " ++
+            "`asm` builds Janet functions from a runtime dictionary; `marshal` " ++
+            "serializes Janet values WITH bytecode. Both defeat source-level " ++
+            "review of user scripts. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §6 #15 (added 2026-05-19).",
+    );
+}
+
 /// The static list of removals. Each entry: (Janet symbol, panic stub,
 /// short docstring shown by Janet's `(doc ...)`). Adding to this list is
 /// a single-line change; the test below iterates the same list to prove
@@ -395,6 +449,60 @@ pub const REMOVED_BINDINGS = [_]RemovedBinding{
     .{ .sym = "os/touch", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
     .{ .sym = "os/symlink", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
     .{ .sym = "os/chmod", .stub = panic_removed_fs_ancillary, .doc = "mast-sandbox: REMOVED in v0.2.1." },
+
+    // v1.3.4 (2026-05-19) — adversarial-review-driven closures.
+    //
+    // Finding #1: os/open + parallel file/* methods are a full fs-I/O
+    // sandbox bypass. The previous "file I/O CLOSED in v0.2" claim was
+    // half-true — it removed file/open but left os/open + file/read/
+    // write/close/seek/tell/flush + os/pipe live. (file/read (os/open
+    // "/etc/shadow" :r) :all) worked under MAST_SANDBOX_STRICT=1.
+    .{ .sym = "os/open", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED in v1.3.4 (fs bypass via parallel constructor)." },
+    .{ .sym = "os/pipe", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED in v1.3.4 (pipe-fd handle into file/* surface)." },
+    .{ .sym = "file/read", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "file/write", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "file/close", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "file/seek", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "file/tell", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "file/flush", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "file/lines", .stub = panic_removed_file_io, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+
+    // v1.3.4 — Finding #2: FFI surface is live, not "theoretical."
+    // ffi/jitfn alone is strictly stronger than the removed `native` —
+    // it mmaps and jumps to arbitrary native bytecode.
+    .{ .sym = "ffi/native", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/lookup", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/call", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/signature", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/jitfn", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4 (mmap+execute primitive)." },
+    .{ .sym = "ffi/malloc", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/free", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/read", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/write", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/pointer-cfunction", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/pointer-buffer", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/struct", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/size", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/align", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "ffi/context", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+
+    // v1.3.4 — Finding #5: host process control survivors.
+    .{ .sym = "os/cd", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "os/umask", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "os/link", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "os/proc-kill", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4 (arbitrary-pid signal)." },
+    .{ .sym = "os/proc-wait", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "os/proc-close", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "os/sigaction", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    .{ .sym = "os/posix-chroot", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+
+    // v1.3.4 — Finding #6: bytecode constructors that defeat source review.
+    // Note: `compile` and `signal` are intentionally NOT removed — `compile`
+    // is used by every (eval ...), and `signal` is the primitive try/catch
+    // depends on. Removing them would break the language; they're tracked
+    // as v0.4 residual §6 #16. debug/* primitives are similarly retained.
+    .{ .sym = "asm", .stub = panic_removed_bytecode, .doc = "mast-sandbox: REMOVED in v1.3.4 (bytecode constructor from data)." },
+    .{ .sym = "marshal", .stub = panic_removed_bytecode, .doc = "mast-sandbox: REMOVED in v1.3.4 (paired with unmarshal — bytecode serializer)." },
 };
 
 // ─── Application ────────────────────────────────────────────────────────
@@ -678,6 +786,44 @@ test "G2 closure: every REMOVED_BINDINGS entry panics from Janet" {
         .{ .sym = "os/touch", .src = "(os/touch \"/tmp/mast-test-touch\")" },
         .{ .sym = "os/symlink", .src = "(os/symlink \"/tmp/x\" \"/tmp/y\")" },
         .{ .sym = "os/chmod", .src = "(os/chmod \"/tmp/x\" 8r777)" },
+        // v1.3.4 — adversarial-review finding #1: os/open + file/* surface
+        .{ .sym = "os/open", .src = "(os/open \"/etc/hostname\" :r)" },
+        .{ .sym = "os/pipe", .src = "(os/pipe)" },
+        .{ .sym = "file/read", .src = "(file/read nil :all)" },
+        .{ .sym = "file/write", .src = "(file/write nil \"x\")" },
+        .{ .sym = "file/close", .src = "(file/close nil)" },
+        .{ .sym = "file/seek", .src = "(file/seek nil :set 0)" },
+        .{ .sym = "file/tell", .src = "(file/tell nil)" },
+        .{ .sym = "file/flush", .src = "(file/flush nil)" },
+        .{ .sym = "file/lines", .src = "(file/lines nil)" },
+        // v1.3.4 — adversarial-review finding #2: FFI surface
+        .{ .sym = "ffi/native", .src = "(ffi/native \"/lib/libc.so.6\")" },
+        .{ .sym = "ffi/lookup", .src = "(ffi/lookup nil \"system\")" },
+        .{ .sym = "ffi/call", .src = "(ffi/call nil)" },
+        .{ .sym = "ffi/signature", .src = "(ffi/signature :default :void)" },
+        .{ .sym = "ffi/jitfn", .src = "(ffi/jitfn @\"x\")" },
+        .{ .sym = "ffi/malloc", .src = "(ffi/malloc 16)" },
+        .{ .sym = "ffi/free", .src = "(ffi/free nil)" },
+        .{ .sym = "ffi/read", .src = "(ffi/read :u8 nil)" },
+        .{ .sym = "ffi/write", .src = "(ffi/write :u8 0 nil)" },
+        .{ .sym = "ffi/pointer-cfunction", .src = "(ffi/pointer-cfunction nil)" },
+        .{ .sym = "ffi/pointer-buffer", .src = "(ffi/pointer-buffer nil 1)" },
+        .{ .sym = "ffi/struct", .src = "(ffi/struct :u8)" },
+        .{ .sym = "ffi/size", .src = "(ffi/size :u8)" },
+        .{ .sym = "ffi/align", .src = "(ffi/align :u8)" },
+        .{ .sym = "ffi/context", .src = "(ffi/context)" },
+        // v1.3.4 — adversarial-review finding #5: process-control survivors
+        .{ .sym = "os/cd", .src = "(os/cd \"/tmp\")" },
+        .{ .sym = "os/umask", .src = "(os/umask 0)" },
+        .{ .sym = "os/link", .src = "(os/link \"/tmp/a\" \"/tmp/b\")" },
+        .{ .sym = "os/proc-kill", .src = "(os/proc-kill nil)" },
+        .{ .sym = "os/proc-wait", .src = "(os/proc-wait nil)" },
+        .{ .sym = "os/proc-close", .src = "(os/proc-close nil)" },
+        .{ .sym = "os/sigaction", .src = "(os/sigaction :term (fn [s] nil))" },
+        .{ .sym = "os/posix-chroot", .src = "(os/posix-chroot \"/tmp\")" },
+        // v1.3.4 — adversarial-review finding #6: bytecode constructors
+        .{ .sym = "asm", .src = "(asm '{:bytecode []})" },
+        .{ .sym = "marshal", .src = "(marshal 1)" },
     };
 
     // The static list and the test list MUST cover the same set. If

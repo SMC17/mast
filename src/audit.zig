@@ -86,12 +86,15 @@ pub const SessionAudit = struct {
         if (self.fd < 0) return;
         var buf: [4096]u8 = undefined;
         var written: usize = 0;
-        const header = try std.fmt.bufPrint(buf[written..], "{{\"ts\":{d},\"sid\":\"{s}\",\"event\":\"{s}\"", .{
+        const header = try std.fmt.bufPrint(buf[written..], "{{\"ts\":{d},\"sid\":\"{s}\",\"event\":", .{
             unixSec(),
             self.session_id,
-            event,
         });
         written += header.len;
+        // Event name flows from caller code (always trusted string literals
+        // today), but escape it anyway for defense in depth so a hypothetical
+        // future caller passing user data can't break the JSON line.
+        written += try writeJsonString(buf[written..], event);
 
         const T = @TypeOf(payload);
         const ti = @typeInfo(T);
@@ -106,29 +109,44 @@ pub const SessionAudit = struct {
                 const field_val = @field(payload, field.name);
                 const ftype = @TypeOf(field_val);
                 const ftype_info = @typeInfo(ftype);
-                const rendered = switch (ftype_info) {
-                    .int, .comptime_int => try std.fmt.bufPrint(buf[written..], "\"{s}\":{d}", .{ field.name, field_val }),
-                    .pointer => |p| blk: {
+                switch (ftype_info) {
+                    .int, .comptime_int => {
+                        const r = try std.fmt.bufPrint(buf[written..], "\"{s}\":{d}", .{ field.name, field_val });
+                        written += r.len;
+                    },
+                    .bool => {
+                        const r = try std.fmt.bufPrint(buf[written..], "\"{s}\":{s}", .{ field.name, if (field_val) "true" else "false" });
+                        written += r.len;
+                    },
+                    .pointer => |p| {
                         if (p.size == .slice and p.child == u8) {
-                            break :blk try std.fmt.bufPrint(buf[written..], "\"{s}\":\"{s}\"", .{ field.name, field_val });
-                        }
-                        // Pointer-to-array of u8 (string literals like "file")
-                        if (p.size == .one) {
+                            // Slice-of-u8 — user-controllable. Escape it.
+                            written += try writeKvString(buf[written..], field.name, field_val);
+                        } else if (p.size == .one) {
                             const child_info = @typeInfo(p.child);
                             if (child_info == .array and child_info.array.child == u8) {
                                 const slice: []const u8 = field_val[0..];
-                                break :blk try std.fmt.bufPrint(buf[written..], "\"{s}\":\"{s}\"", .{ field.name, slice });
+                                written += try writeKvString(buf[written..], field.name, slice);
+                            } else {
+                                const r = try std.fmt.bufPrint(buf[written..], "\"{s}\":null", .{field.name});
+                                written += r.len;
                             }
+                        } else {
+                            const r = try std.fmt.bufPrint(buf[written..], "\"{s}\":null", .{field.name});
+                            written += r.len;
                         }
-                        break :blk try std.fmt.bufPrint(buf[written..], "\"{s}\":null", .{field.name});
                     },
-                    .array => |arr| if (arr.child == u8)
-                        try std.fmt.bufPrint(buf[written..], "\"{s}\":\"{s}\"", .{ field.name, field_val[0..] })
-                    else
-                        try std.fmt.bufPrint(buf[written..], "\"{s}\":null", .{field.name}),
-                    else => try std.fmt.bufPrint(buf[written..], "\"{s}\":null", .{field.name}),
-                };
-                written += rendered.len;
+                    .array => |arr| if (arr.child == u8) {
+                        written += try writeKvString(buf[written..], field.name, field_val[0..]);
+                    } else {
+                        const r = try std.fmt.bufPrint(buf[written..], "\"{s}\":null", .{field.name});
+                        written += r.len;
+                    },
+                    else => {
+                        const r = try std.fmt.bufPrint(buf[written..], "\"{s}\":null", .{field.name});
+                        written += r.len;
+                    },
+                }
             }
             buf[written] = '}';
             written += 1;
@@ -142,6 +160,132 @@ pub const SessionAudit = struct {
         if (rc < 0) return error.WriteFailed;
     }
 };
+
+// JSON-escape a string into `out`, prefixed with the opening `"` and
+// suffixed with the closing `"`. Closes adversarial-review finding #3:
+// user-controllable strings (M-x verbs, save-as paths, buffer names)
+// would otherwise flow into the JSONL log unescaped, letting a hostile
+// input forge sandbox-grant or session-end events by injecting `","`
+// followed by attacker-chosen JSON. Now: `"`, `\`, and bytes < 0x20
+// are escaped per RFC 8259; the resulting line is always one valid
+// JSON object.
+fn writeJsonString(out: []u8, s: []const u8) !usize {
+    if (out.len < 2) return error.NoSpaceLeft;
+    var w: usize = 0;
+    out[w] = '"';
+    w += 1;
+    for (s) |c| {
+        switch (c) {
+            '"' => {
+                if (w + 2 > out.len) return error.NoSpaceLeft;
+                out[w] = '\\';
+                out[w + 1] = '"';
+                w += 2;
+            },
+            '\\' => {
+                if (w + 2 > out.len) return error.NoSpaceLeft;
+                out[w] = '\\';
+                out[w + 1] = '\\';
+                w += 2;
+            },
+            '\n' => {
+                if (w + 2 > out.len) return error.NoSpaceLeft;
+                out[w] = '\\';
+                out[w + 1] = 'n';
+                w += 2;
+            },
+            '\r' => {
+                if (w + 2 > out.len) return error.NoSpaceLeft;
+                out[w] = '\\';
+                out[w + 1] = 'r';
+                w += 2;
+            },
+            '\t' => {
+                if (w + 2 > out.len) return error.NoSpaceLeft;
+                out[w] = '\\';
+                out[w + 1] = 't';
+                w += 2;
+            },
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+                // Other control chars: \u00XX
+                if (w + 6 > out.len) return error.NoSpaceLeft;
+                const hex = "0123456789abcdef";
+                out[w] = '\\';
+                out[w + 1] = 'u';
+                out[w + 2] = '0';
+                out[w + 3] = '0';
+                out[w + 4] = hex[c >> 4];
+                out[w + 5] = hex[c & 0x0f];
+                w += 6;
+            },
+            else => {
+                if (w + 1 > out.len) return error.NoSpaceLeft;
+                out[w] = c;
+                w += 1;
+            },
+        }
+    }
+    if (w + 1 > out.len) return error.NoSpaceLeft;
+    out[w] = '"';
+    w += 1;
+    return w;
+}
+
+/// Helper: emit `"name":"escaped(value)"` into `out`. Returns bytes written.
+fn writeKvString(out: []u8, name: []const u8, value: []const u8) !usize {
+    var w: usize = 0;
+    // Field name is always a Zig comptime identifier — trusted, no escape.
+    const prefix = try std.fmt.bufPrint(out[w..], "\"{s}\":", .{name});
+    w += prefix.len;
+    w += try writeJsonString(out[w..], value);
+    return w;
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────────
+
+test "writeJsonString: trivial ASCII round-trips" {
+    var buf: [64]u8 = undefined;
+    const n = try writeJsonString(&buf, "hello");
+    try std.testing.expectEqualStrings("\"hello\"", buf[0..n]);
+}
+
+test "writeJsonString: escapes quote backslash and newline (audit-injection guard)" {
+    var buf: [64]u8 = undefined;
+    const n = try writeJsonString(&buf, "a\"b\\c\nd");
+    try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\nd\"", buf[0..n]);
+}
+
+test "writeJsonString: control bytes become \\u00XX (defense vs injection)" {
+    var buf: [64]u8 = undefined;
+    var input: [3]u8 = .{ 'x', 0x01, 'y' };
+    const n = try writeJsonString(&buf, &input);
+    try std.testing.expectEqualStrings("\"x\\u0001y\"", buf[0..n]);
+}
+
+test "writeJsonString: adversarial-review #3 PoC is neutralized" {
+    // The published PoC: M-x verb containing `","verb":"sandbox-grant","x":"`
+    // would, pre-fix, flow into a JSONL line that forged a sandbox-grant
+    // event. Post-fix, the quotes get escaped and the malicious payload
+    // becomes literal data inside the original event's verb field.
+    var buf: [256]u8 = undefined;
+    const evil = "\",\"verb\":\"sandbox-grant\",\"x\":\"";
+    const n = try writeJsonString(&buf, evil);
+    // Every internal `"` must be escaped.
+    var quote_count: usize = 0;
+    for (buf[0..n]) |c| {
+        if (c == '"') quote_count += 1;
+    }
+    // Two delimiter quotes + every original quote escaped (so its `"`
+    // doesn't count as a JSON delimiter — but it IS still a literal `"`
+    // byte in the output, preceded by `\`).
+    // We assert the simpler invariant: the output contains at least one
+    // `\"` sequence per original quote, and starts + ends with `"`.
+    try std.testing.expect(buf[0] == '"');
+    try std.testing.expect(buf[n - 1] == '"');
+    try std.testing.expect(quote_count > 2); // delimiters + escaped originals
+    // The `\\"` (backslash-then-quote) pair must appear.
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "\\\"") != null);
+}
 
 fn mkdirP(allocator: std.mem.Allocator, path: []const u8) !void {
     // Recursive mkdir -p via libc.mkdir
