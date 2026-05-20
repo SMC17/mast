@@ -139,6 +139,35 @@ else
     echo "        got tail: $(echo "$multi_out" | tail -8 | sed 's/^/        /')"
 fi
 
+# ─── Case 5: v1.4 shell-quota propagation ────────────────────────────
+#
+# Round-5 residual #30 (closed in v1.4): pre-v1.4, `(os/shell "sleep
+# 9999")` blocked for the full 9999s because libc.system swallowed EINTR.
+# v1.4 replaced libc.system with a fork+execv+poll(50ms)+waitpid loop
+# bounded by g_alarm_fires.  This case asserts:
+#   1. The os/shell call returns within a fudged wall-clock window
+#      (quota + slop), NOT 9999s
+#   2. The return value is -1 (the documented quota-interrupted sentinel)
+#   3. The editor recovers cleanly
+
+t_start=$(date +%s)
+shell_out=$(echo '(os/shell "sleep 9999")' | timeout 10 \
+    env MAST_EVAL_TIMEOUT_SEC=2 "$MAST_BIN" 2>&1) || true
+t_end=$(date +%s)
+elapsed=$((t_end - t_start))
+
+if [ "$elapsed" -lt 7 ]; then
+    pass "v1.4 §30: (os/shell sleep 9999) bounded by quota (elapsed=${elapsed}s, budget=2s)"
+else
+    fail "v1.4 §30: (os/shell sleep 9999) NOT bounded (elapsed=${elapsed}s)"
+fi
+if echo "$shell_out" | grep -qE '→ -1( |$)'; then
+    pass "v1.4 §30: quota-interrupted shell returns -1 sentinel"
+else
+    fail "v1.4 §30: quota-interrupted shell did not return -1"
+    echo "        got: $(echo "$shell_out" | grep '→' | head -2)"
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────────
 echo ""
 if [ "$n_fail" -gt 0 ]; then

@@ -127,6 +127,69 @@ fn onSandboxDeny(cat: sandbox.DenyCategory) void {
     }
 }
 
+// ─── v1.4 shell runner: fork+execv+poll+waitpid bounded by quota ───────
+//
+// Closes round-5 honest residual #30. Pre-v1.4, gated_os_shell and
+// gated_stax_bash called libc.system which is TEMP_FAILURE_RETRY-style:
+// its internal waitpid swallows EINTR, so the SIGALRM-driven quota
+// could never interrupt a `(os/shell "sleep 9999")`. v1.4 replaces the
+// system(3) call with fork+execv+poll(stdout_fd, 500ms)+waitpid loop
+// that checks g_alarm_fires between iterations — same pattern as
+// cmd_agent_wait.
+//
+// Returns the child's exit status, or -1 if the quota fired (in which
+// case the child was SIGTERM'd and reaped first to avoid leaking it).
+// Does NOT capture stdout — gated_os_shell semantics match Janet's
+// upstream which returns only the exit code.
+fn runShellExitOnly(cmd: [*c]const u8) callconv(.c) c_int {
+    // Open /dev/null as the child's stdout to match libc.system semantics
+    // (which lets the child write to its inherited stdout). Actually we
+    // want the child's output to reach mast's terminal as before — so
+    // DON'T redirect stdout; just fork+execv+poll-the-pid via SIGCHLD.
+    // The simpler design: fork, parent uses waitpid(WNOHANG) in a loop
+    // with a SIGALRM-bounded sleep between checks.
+    const child = libc.fork();
+    if (child < 0) return -1;
+    if (child == 0) {
+        // Child: just exec; inherit stdout/stderr.
+        const sh: [*c]const u8 = @ptrCast("/bin/sh");
+        const argv_array = [_:null]?[*:0]const u8{
+            "/bin/sh",
+            "-c",
+            @ptrCast(cmd),
+        };
+        _ = libc.execv(sh, @ptrCast(@constCast(&argv_array)));
+        libc.exit(127);
+    }
+    // Parent: poll for exit + quota check.
+    const baseline = @atomicLoad(c_int, &g_alarm_fires, .seq_cst);
+    var status: c_int = 0;
+    while (true) {
+        // Quota check.
+        if (@atomicLoad(c_int, &g_alarm_fires, .seq_cst) > baseline) {
+            // SIGTERM the child + reap so we don't leak it.
+            _ = libc.kill(child, libc.SIGTERM);
+            _ = libc.waitpid(child, &status, 0);
+            if (g_audit) |a| {
+                a.write("shell-quota-interrupt", .{ .pid = child }) catch {};
+            }
+            return -1;
+        }
+        // Non-blocking waitpid.
+        const rc = libc.waitpid(child, &status, libc.WNOHANG);
+        if (rc > 0) {
+            // Exited.
+            return @intCast((status >> 8) & 0xff);
+        }
+        if (rc < 0) return -1;
+        // Still running. Sleep briefly so we don't burn CPU.
+        // 50ms = 20Hz polling; ~50µs of CPU per check on a quiet
+        // system. The kernel will deliver SIGALRM during the sleep
+        // when the quota fires.
+        _ = libc.usleep(50_000);
+    }
+}
+
 // ─── Resource quota: SIGALRM + janet_interpreter_interrupt ─────────────
 //
 // Closes the v1.3.0 §honest-residuals "no resource quotas" item using
@@ -1256,6 +1319,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // BEFORE the panic propagates, so even unrecoverable denies leave a
     // trace in the audit log before Janet's stacktrace surfaces to stderr.
     sandbox.g_deny_observer = &onSandboxDeny;
+
+    // Install the v1.4 shell runner (closes round-5 residual #30).
+    // gated_os_shell + gated_stax_bash will now route through
+    // runShellExitOnly which is bounded by MAST_EVAL_TIMEOUT_SEC.
+    sandbox.g_shell_runner = &runShellExitOnly;
 
     // Session audit log
     var audit = try SessionAudit.init(allocator, @intCast(libc.getpid()));

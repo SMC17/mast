@@ -6,6 +6,47 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.4.0 — shell-cfunction quota propagation (closes round-5 residual #30) (2026-05-20)
+
+The only remaining named mast residual from rounds 1–5 of adversarial
+review is now closed. Pre-v1.4: `(os/shell "sleep 9999")` with
+`MAST_EVAL_TIMEOUT_SEC=2` blocked for 9999 seconds because
+`libc.system` is TEMP_FAILURE_RETRY-style — its internal `waitpid`
+swallows EINTR, so SIGALRM bumped `g_alarm_fires` but the VM was
+parked in the cfunction and the interrupt only took effect when
+bytecode resumed (after the shell exited).
+
+**v1.4 architecture:** new `sandbox.g_shell_runner` function-pointer
+hook. `main.zig::runShellExitOnly` is the production runner; it does
+`fork` + `execv` then a poll loop with `waitpid(WNOHANG)` +
+`usleep(50ms)`, checking `g_alarm_fires` between iterations. On
+quota fire: `SIGTERM` the child, blocking-reap via `waitpid`, write
+`shell-quota-interrupt` audit event, return `-1` sentinel.
+`gated_os_shell` + `gated_stax_bash` route through the hook instead
+of calling `libc.system` directly.
+
+The legacy `libc.system` fallback remains for early-startup / test
+contexts when no host runner is installed.
+
+**Smoke confirmation:**
+```
+$ printf '(os/shell "sleep 9999")\nexit\n' | MAST_EVAL_TIMEOUT_SEC=2 ./zig-out/bin/mast
+M-x   → -1            # quota fired after ~2s; pre-v1.4 this was 9999s
+M-x (exiting)         # editor recovered cleanly
+```
+
+**Test coverage:** `tests/quota_integration.sh` grows to 8/8 (added
+Case 5 + Case 6: wall-clock bound + `-1` sentinel assertion).
+
+**Known v1.4.1 follow-up:** `cmd_agent_run` (the synchronous
+`(agent/run ...)` path) still uses `libc.popen` + `fread`. The
+popen→fork+exec+capture-stdout refactor is substantially larger than
+the exit-only path. The async surface (`agent/spawn` + `agent/wait`)
+is already quota-bounded as of v1.3.9 + v1.3.10 and is the
+recommended way to capture stdout under quota.
+
+API-additive: new `sandbox.g_shell_runner` public hook; no removals.
+
 ### v1.3.10 — round-5 adversarial review: production-robustness closures (2026-05-19)
 
 Round 5 (`research/2026-05-19-adversarial-review-round5.md`) explicitly

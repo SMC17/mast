@@ -140,7 +140,9 @@ fn gated_os_shell(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     const arg = argv[0];
     const s_ptr = janet.janet_unwrap_string(arg);
     const c_str = @as([*c]const u8, @ptrCast(s_ptr));
-    const rc: i32 = @intCast(libc.system(c_str));
+    // v1.4: route through the host runner so wall-clock quota actually
+    // bounds this surface (closes round-5 residual #30).
+    const rc = runShellGated(c_str);
     return janet.janet_wrap_integer(rc);
 }
 
@@ -160,7 +162,9 @@ pub fn gated_stax_bash(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Jane
     const arg = argv[0];
     const s_ptr = janet.janet_unwrap_string(arg);
     const c_str = @as([*c]const u8, @ptrCast(s_ptr));
-    const rc: i32 = @intCast(libc.system(c_str));
+    // v1.4: route through the host runner for wall-clock quota
+    // enforcement (closes round-5 residual #30).
+    const rc = runShellGated(c_str);
     return janet.janet_wrap_integer(rc);
 }
 
@@ -223,6 +227,29 @@ pub var g_deny_observer: ?*const fn (cat: DenyCategory) void = null;
 
 fn observe(cat: DenyCategory) void {
     if (g_deny_observer) |f| f(cat);
+}
+
+// ─── Shell-runner hook (v1.4 — closes round-5 residual #30) ────────────
+//
+// The gated `os/shell` and `stax-bash` wrappers used `libc.system` which
+// is TEMP_FAILURE_RETRY-style — internal waitpid swallows EINTR, so the
+// SIGALRM-driven wall-clock quota was ineffective for these surfaces.
+// v1.4 routes both through a host-installed runner that uses fork+execv+
+// poll+waitpid bounded by the quota counter (g_alarm_fires).
+//
+// The runner lives in main.zig (where g_alarm_fires + libc.poll/waitpid
+// are imported). sandbox.zig holds the function pointer; if no runner
+// is installed (eg. early-startup tests), the legacy libc.system path
+// is used as a fallback so the gates still work.
+
+pub var g_shell_runner: ?*const fn (cmd: [*c]const u8) callconv(.c) c_int = null;
+
+fn runShellGated(cmd: [*c]const u8) c_int {
+    if (g_shell_runner) |runner| return runner(cmd);
+    // Legacy fallback: libc.system. Used pre-v1.4 and in test contexts
+    // where the host runner isn't installed. Quota does not bound this
+    // path (the known residual #30).
+    return @intCast(libc.system(cmd));
 }
 
 // ─── Removed-binding stubs (G2 closure) ─────────────────────────────────
