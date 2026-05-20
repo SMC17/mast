@@ -388,6 +388,61 @@ than hide them. **Items #1–5 of the prior version are CLOSED by G2
     process-global. Two separate Janet environments in the same process
     share the same capability set. v2 keys the set off the `JanetTable*`.
 
+**v1.3.4 (2026-05-19) — adversarial-review-driven additions.** A
+self-applied hostile-reviewer pass (`research/2026-05-19-adversarial-review.md`)
+identified seven net-new gaps the prior threat model missed. Findings
+14–20 below: six are CLOSED in v1.3.4, one (#19) is documented
+intentional residual.
+
+14. ~~**`os/open` + parallel `file/*` methods bypassed the v0.2 file-I/O
+    closure.**~~ **CLOSED 2026-05-19 (v1.3.4):** `os/open`, `os/pipe`,
+    `file/read`, `file/write`, `file/close`, `file/seek`, `file/tell`,
+    `file/flush`, `file/lines` removed via panic stubs. The prior v0.2
+    "file I/O CLOSED" claim was half-true — it removed `file/open` and
+    `slurp`/`spit` but left `os/open` and the `file/*` methods live.
+    PoC under MAST_SANDBOX_STRICT=1 was
+    `(file/read (os/open "/etc/shadow" :r) :all)`; now panics.
+15. ~~**FFI surface was live, not "theoretical."**~~ **CLOSED
+    2026-05-19 (v1.3.4):** The prior §3 row claimed the vendored Janet
+    did not compile FFI; in fact `vendored/janet/janet.h:269` defines
+    `JANET_FFI` unconditionally and the full surface was live. All 15
+    `ffi/*` symbols now removed. `ffi/jitfn` alone is strictly stronger
+    than the removed `native`.
+16. ~~**JSON injection into the audit log.**~~ **CLOSED 2026-05-19
+    (v1.3.4):** `src/audit.zig::writeJsonString` escapes `"`, `\`, and
+    control bytes per RFC 8259. The published PoC verb
+    `","verb":"sandbox-grant","x":"` (which would have forged a
+    sandbox-grant event) is neutralized; in-source test asserts it.
+17. ~~**ANSI escape injection through buffer name + contents in the
+    TUI.**~~ **CLOSED 2026-05-19 (v1.3.4):** `src/tui.zig::sanitize_into`
+    replaces ESC (0x1b), BEL (0x07), DEL (0x7f), and other C0 control
+    bytes (except `\t`/`\n`/`\r`) with `?` in the render path. The OSC 52
+    clipboard-hijack PoC (`(agent/spawn "printf '\\x1b]52;c;...\\x07'")`)
+    no longer reaches the terminal.
+18. ~~**Process-control survivors after v0.2.1 ancillary-fs sweep.**~~
+    **CLOSED 2026-05-19 (v1.3.4):** `os/cd`, `os/umask`, `os/link`,
+    `os/proc-kill` (arbitrary-pid signal — strictly worse than the
+    gated `agent/kill`), `os/proc-wait`, `os/proc-close`,
+    `os/sigaction` (could make mast un-killable by SIGTERM),
+    `os/posix-chroot` all removed.
+19. **`compile`, `signal`, `debug/*` not removed (intentional residual).**
+    The adversarial review's Finding #6 named these alongside `asm`/
+    `marshal` as bytecode/runtime-introspection primitives that defeat
+    source-level review. `asm` + `marshal` ARE removed in v1.3.4, but
+    `compile` underpins every `(eval …)`, `signal` is the primitive
+    `try`/`catch` raises through, and `debug/*` is the only Janet
+    introspection surface. Removing them would break the language.
+    **Implication:** the v2 capability-manifest plan (§7) MUST NOT
+    assume source-level review is sound — the manifest needs to be a
+    runtime grant, not a code scan. Tracked for v0.4 design.
+20. ~~**`agent/wait` DoS under strict mode.**~~ **CLOSED 2026-05-19
+    (v1.3.4):** `agent/wait` + `poll` + `count` + `alive?` previously
+    were not gated on `exec`. PoC: user runs
+    `M-x agent-run "sleep 9999"` under default policy; later, any
+    strict-mode script calling `(agent/wait 0)` froze mast for the
+    full hour. Now: every `agent/*` operation gates on `exec`,
+    matching the capability that created the handle.
+
 ---
 
 ## 7. Out of scope for v1
