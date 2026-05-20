@@ -101,6 +101,25 @@ fn prevBuffer() usize {
 // Parser lives in sandbox.zig so the unit test can exercise it without
 // dragging main.zig into a test target.
 
+/// Sanitize a user-supplied buffer name in place (round-2 adversarial
+/// finding #3): canonicalize on write at the trust boundary instead of
+/// hoping every reader remembers to sanitize. Replaces ESC, BEL, DEL,
+/// and other C0 control bytes (except `\t`/`\n`/`\r`) with `?`. Returns
+/// the slice of `out_buf` actually written.
+fn sanitizeNameInto(out_buf: []u8, raw: []const u8) []const u8 {
+    const n = @min(raw.len, out_buf.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const c = raw[i];
+        out_buf[i] = switch (c) {
+            0x09, 0x0a, 0x0d => c,
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => '?',
+            else => c,
+        };
+    }
+    return out_buf[0..n];
+}
+
 fn onSandboxDeny(cat: sandbox.DenyCategory) void {
     if (g_audit) |a| {
         a.write("sandbox-deny", .{ .category = @tagName(cat) }) catch {};
@@ -363,6 +382,11 @@ fn cmd_agent_spawn(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = libc.close(pipefd[1]);
     const flags = libc.fcntl(pipefd[0], libc.F_GETFL, @as(c_int, 0));
     _ = libc.fcntl(pipefd[0], libc.F_SETFL, flags | libc.O_NONBLOCK);
+    // FD_CLOEXEC on the pipe-read end so future fork+execs don't leak
+    // it (round-2 adversarial finding #2). The pipe-write end was
+    // already closed in the parent.
+    const fdflags = libc.fcntl(pipefd[0], libc.F_GETFD, @as(c_int, 0));
+    _ = libc.fcntl(pipefd[0], libc.F_SETFD, fdflags | libc.FD_CLOEXEC);
 
     g_agents.append(allocator, .{
         .pid = @intCast(child),
@@ -879,7 +903,16 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
                     print("  (usage: M-x new-buffer <name>)\n\n", .{});
                     continue;
                 }
-                const new_buf = Buffer.fromBytes(allocator, .agent, parsed.args[0], "") catch |e| {
+                // Sanitize the name at the trust boundary (round-2
+                // adversarial finding #3 doctrine: canonicalize on write,
+                // not on every read). list-buffers / display / TUI
+                // status-bar all consume buf.name; sanitizing here means
+                // every consumer sees safe bytes regardless of whether
+                // they remember to sanitize themselves.
+                var name_sanitized: [256]u8 = undefined;
+                const raw_name = parsed.args[0];
+                const sn = sanitizeNameInto(&name_sanitized, raw_name);
+                const new_buf = Buffer.fromBytes(allocator, .agent, sn, "") catch |e| {
                     print("  (new-buffer error: {})\n\n", .{e});
                     continue;
                 };
@@ -973,6 +1006,14 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
                     print("  (usage: M-x save-as <path>)\n\n", .{});
                     continue;
                 }
+                // Sanitize path-as-name at the trust boundary (round-2
+                // adversarial finding #3). The actual filesystem write
+                // still uses the original (un-sanitized) path because
+                // the underlying syscalls don't care about ANSI escapes
+                // — but the in-memory buffer name (which flows into
+                // list-buffers/display/TUI) must be safe to print.
+                var name_sanitized: [512]u8 = undefined;
+                _ = sanitizeNameInto(&name_sanitized, parsed.args[0]);
                 // If no buffer is open, create an empty :file buffer at the
                 // target path (same semantics as `vim some-new-file.txt`).
                 if (currentBuffer() == null) {
@@ -1457,7 +1498,9 @@ fn load_init_janet(allocator: Allocator, env: *janet.JanetTable, audit: *Session
     // codebase, which avoids std.fs/std.Io churn across Zig 0.13–0.16).
     const c_path = try allocator.dupeZ(u8, path);
     defer allocator.free(c_path);
-    const fd = libc.open(@ptrCast(c_path.ptr), libc.O_RDONLY);
+    // O_CLOEXEC closes round-2 adversarial finding #2 for the
+    // init.janet read fd; without it children inherit the open file.
+    const fd = libc.open(@ptrCast(c_path.ptr), libc.O_RDONLY | libc.O_CLOEXEC);
     if (fd < 0) return error.InitFileMissing;
     defer _ = libc.close(fd);
 

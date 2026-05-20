@@ -209,6 +209,14 @@ pub const DenyCategory = enum {
     /// adversarial-review finding #6: `asm` builds Janet functions from
     /// a runtime dictionary, nullifying source-level review.
     bytecode,
+    /// OS-thread spawning (ev/thread, ev/thread-chan) — added 2026-05-19
+    /// after round-2 adversarial review finding #1: `ev/thread` calls
+    /// `janet_init()` in a new OS thread, creating a fresh Janet VM with
+    /// the FULL stdlib. The applyDefaultDeny installed against the main
+    /// thread's env does NOT cover the new VM — every removed binding
+    /// is reachable from the spawned thread. `ev/go` is single-thread
+    /// and DOES inherit the gated env, so it's not in this category.
+    threading,
 };
 
 pub var g_deny_observer: ?*const fn (cat: DenyCategory) void = null;
@@ -391,6 +399,21 @@ fn panic_removed_bytecode(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.J
     );
 }
 
+fn panic_removed_threading(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    observe(.threading);
+    janet.janet_panicf(
+        "mast.sandbox: OS-thread spawning is REMOVED in v1.3.6 — " ++
+            "ev/thread calls janet_init() in a new OS thread, creating a fresh " ++
+            "Janet VM with the FULL stdlib that bypasses applyDefaultDeny. " ++
+            "Every removed binding is reachable from the spawned thread. " ++
+            "ev/go (single-thread) is intentionally NOT removed; it inherits " ++
+            "the gated env. " ++
+            "See docs/SANDBOX_THREAT_MODEL.md §6 #21 (added 2026-05-19).",
+    );
+}
+
 /// The static list of removals. Each entry: (Janet symbol, panic stub,
 /// short docstring shown by Janet's `(doc ...)`). Adding to this list is
 /// a single-line change; the test below iterates the same list to prove
@@ -503,6 +526,14 @@ pub const REMOVED_BINDINGS = [_]RemovedBinding{
     // as v0.4 residual §6 #16. debug/* primitives are similarly retained.
     .{ .sym = "asm", .stub = panic_removed_bytecode, .doc = "mast-sandbox: REMOVED in v1.3.4 (bytecode constructor from data)." },
     .{ .sym = "marshal", .stub = panic_removed_bytecode, .doc = "mast-sandbox: REMOVED in v1.3.4 (paired with unmarshal — bytecode serializer)." },
+
+    // v1.3.6 — round-2 adversarial finding #1: OS-thread spawning bypass.
+    // ev/thread + ev/thread-chan call janet_init() in a new OS thread,
+    // creating a fresh Janet VM that has none of the applyDefaultDeny
+    // protection from the main thread's env.
+    .{ .sym = "ev/thread", .stub = panic_removed_threading, .doc = "mast-sandbox: REMOVED in v1.3.6 (fresh-VM bypass of applyDefaultDeny)." },
+    .{ .sym = "ev/thread-chan", .stub = panic_removed_threading, .doc = "mast-sandbox: REMOVED in v1.3.6." },
+    .{ .sym = "ev/spawn-thread", .stub = panic_removed_threading, .doc = "mast-sandbox: REMOVED in v1.3.6." },
 };
 
 // ─── Application ────────────────────────────────────────────────────────
@@ -824,6 +855,10 @@ test "G2 closure: every REMOVED_BINDINGS entry panics from Janet" {
         // v1.3.4 — adversarial-review finding #6: bytecode constructors
         .{ .sym = "asm", .src = "(asm '{:bytecode []})" },
         .{ .sym = "marshal", .src = "(marshal 1)" },
+        // v1.3.6 — round-2 finding #1: OS-thread bypass
+        .{ .sym = "ev/thread", .src = "(ev/thread (fn [_] nil) nil :n)" },
+        .{ .sym = "ev/thread-chan", .src = "(ev/thread-chan 1)" },
+        .{ .sym = "ev/spawn-thread", .src = "(ev/spawn-thread nil)" },
     };
 
     // The static list and the test list MUST cover the same set. If
