@@ -97,7 +97,7 @@ Per [docs/SANDBOX_THREAT_MODEL.md](docs/SANDBOX_THREAT_MODEL.md):
   auto-grant of `exec` so the production binary exhibits default-deny.
 - `gated_stax_bash` accepts exactly one argv element; any other count
   panics (M04 KILLED).
-- **31-entry `REMOVED_BINDINGS` static list** (v1.3.0): the dangerous
+- **65-entry `REMOVED_BINDINGS` static list** (v1.3.0 base + v1.3.4 adversarial closures): the dangerous
   Janet symbols documented in threat-model §5.2 are removed from the
   embedded env via panic stubs. The static list and the load-bearing
   test (`G2 closure: every REMOVED_BINDINGS entry panics from Janet`)
@@ -156,4 +156,7 @@ not the cosign double-provenance the substrate-tier projects ship).
 | v1.1.0  | file-write buffer ops + atomic save + 12 doctest checks        | save / saveAs / mutation harness 8/10            |
 | v1.2.0  | 7200-trial property corpus + buffer-protocol benchmark         | BENCH.md + 16/16 tests + GPG-signed tag           |
 | v1.3.0  | G2 sandbox closure (31 removed bindings) + multi-buffer ring + agent-as-buffer (sync + async/live-tail) + in-house ANSI/termios TUI behind --tui | `(agent/spawn/poll/wait/count/alive?)`, `M-x list-buffers/next/prev/switch-buffer/new-buffer/agent-run`, `--tui` flag, 22/22 tests |
-| v1.3.x  | residual closures: sandbox-deny audit routing (§6 #9) + agent/wait poll(2) (§6 #8) + host-cfunction regression discipline (§6 #10) + TUI minibuffer sentinels | `tools/cfunction-audit.sh`, `sandbox.DenyCategory` + `g_deny_observer`, doctest extended to 25/25 |
+| v1.3.x  | residual closures: sandbox-deny audit routing (§6 #9) + agent/wait poll(2) (§6 #8 partial) + host-cfunction regression discipline (§6 #10) + TUI minibuffer sentinels | `tools/cfunction-audit.sh`, `sandbox.DenyCategory` + `g_deny_observer`, doctest extended to 25/25 |
+| v1.3.2 / v1.3.3 | agent/kill + TUI damage tracker (frame + per-row) + sandbox property tests + Janet quota primitive identified + examples/init.janet expansion | `(agent/kill h)`, `tui.frame_changed` / `diff_rows`, 3 sandbox property tests, `janet_interpreter_interrupt` documented as v0.4 implementation path |
+| v1.3.4  | **adversarial-review-driven security closures (round 1)** — fs bypass via os/open + parallel file/* methods, full FFI surface (15 syms), audit-log JSON injection, TUI ANSI escape injection (OSC 52 clipboard hijack), process-control survivors, bytecode constructors, agent/wait DoS under STRICT | 7 findings closed, 1 honest residual (#19 compile/signal/debug retained), REMOVED_BINDINGS grows 31 → 65, new DenyCategory variants `.ffi` / `.process_control` / `.bytecode`, audit.zig::writeJsonString + tui.zig::sanitize_into helpers with 7 new in-source tests |
+| v1.3.5  | **wall-clock resource quota** — SIGALRM + janet_interpreter_interrupt + MAST_EVAL_TIMEOUT_SEC env var; cancelled fiber surfaces as mx-error, editor recovers without dying | closes threat-model §6 #8 wall-clock dimension; memory + fd quotas extend same primitive, deferred to v0.4 |
