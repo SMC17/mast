@@ -139,7 +139,7 @@ No raw pointer is ever held by Janet code. Janet never knows the buffer's flat-v
 
 1. Janet build test (`EXTENSIBILITY_LANGUAGE.md` §5 step 1) confirms `@cImport(janet.h)` works.
 2. A minimal Zig program registers `:read` + `:write` + `:point` cfns against a 32-byte in-memory buffer and demonstrates the worked example from §5 round-tripping a string mutation.
-3. A unit test under `<private-substrate>/build-tests/buffer-protocol-smoke/` confirms:
+3. A unit test under `~/mac-mining/editor-substrate/build-tests/buffer-protocol-smoke/` confirms:
    - Reading past `:size` panics with `[:out-of-range :read ...]`.
    - Writing invalid UTF-8 panics with `[:invalid-utf8 ...]`.
    - Subscribing, mutating, then unsubscribing delivers exactly one `:change` event in order.
