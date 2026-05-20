@@ -63,6 +63,17 @@ pub fn build(b: *std.Build) void {
     const tui_tests = b.addTest(.{ .root_module = tui_test_mod });
     const run_tui_tests = b.addRunArtifact(tui_tests);
 
+    // audit.zig in-source tests (audit-JSON escape — closes adversarial
+    // review finding #3). Linked with libc for the time() / sha256 deps.
+    const audit_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/audit.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    audit_test_mod.link_libc = true;
+    const audit_tests = b.addTest(.{ .root_module = audit_test_mod });
+    const run_audit_tests = b.addRunArtifact(audit_tests);
+
 
     // Tests need libc for the open/read/write/rename/unlink syscalls used by
     // Buffer.save/saveAs, so the test module mirrors the main exe's link
@@ -82,9 +93,10 @@ pub fn build(b: *std.Build) void {
 
     const buffer_tests = b.addTest(.{ .root_module = test_mod });
     const run_buffer_tests = b.addRunArtifact(buffer_tests);
-    const test_step = b.step("test", "Run unit tests (buffer protocol + sandbox + tui)");
+    const test_step = b.step("test", "Run unit tests (buffer protocol + sandbox + tui + audit)");
     test_step.dependOn(&run_buffer_tests.step);
     test_step.dependOn(&run_tui_tests.step);
+    test_step.dependOn(&run_audit_tests.step);
 
     // Sandbox tests — need the full Janet runtime linked in so the
     // gated wrappers can actually stand up a VM.

@@ -331,7 +331,14 @@ fn cmd_agent_spawn(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
 /// into its :agent buffer, then check whether the child has exited.
 /// Returns the integer exit status if the child has exited, nil otherwise.
 /// On error returns the keyword :error. Safe to call repeatedly.
+///
+/// Gated on `exec`: poll surfaces process stdout (a side channel that a
+/// non-exec script must not reach) and could otherwise be misused on a
+/// pre-existing handle under MAST_SANDBOX_STRICT=1.
 fn cmd_agent_poll(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (!sandbox.g_sandbox.has(.exec)) {
+        janet.janet_panicf("mast.sandbox: agent/poll denied — `exec` capability not granted (default-deny)");
+    }
     if (argc != 1) {
         janet.janet_panicf("agent/poll: expected 1 integer argument (handle), got %d", argc);
     }
@@ -383,7 +390,15 @@ fn cmd_agent_poll(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
 /// almost always == process exit). The 500ms backstop covers the rare
 /// case of a child that exits WITHOUT closing stdout (eg. a grandchild
 /// still holding it) so we still notice exit via WNOHANG waitpid.
+///
+/// Gated on `exec`: closes adversarial-review finding #7. Without this
+/// gate, a strict-mode script could call `(agent/wait 0)` on a
+/// pre-existing handle and freeze mast for the full duration of the
+/// child's lifetime — even though the script itself has no exec cap.
 fn cmd_agent_wait(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (!sandbox.g_sandbox.has(.exec)) {
+        janet.janet_panicf("mast.sandbox: agent/wait denied — `exec` capability not granted (default-deny)");
+    }
     if (argc != 1) {
         janet.janet_panicf("agent/wait: expected 1 integer argument (handle), got %d", argc);
     }
@@ -443,9 +458,14 @@ fn cmd_agent_wait(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
 }
 
 /// `(agent/count)` — number of registered handles (running + exited).
+/// Gated on `exec` for symmetry; without the gate a strict-mode script
+/// could enumerate the agent fleet's size as a side channel.
 fn cmd_agent_count(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     _ = argc;
     _ = argv;
+    if (!sandbox.g_sandbox.has(.exec)) {
+        janet.janet_panicf("mast.sandbox: agent/count denied — `exec` capability not granted (default-deny)");
+    }
     return janet.janet_wrap_integer(@intCast(g_agents.items.len));
 }
 
@@ -484,7 +504,12 @@ fn cmd_agent_kill(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
 }
 
 /// `(agent/alive? handle)` — boolean, true if handle exists and is unclosed.
+/// Gated on `exec`; without the gate a script can probe whether a
+/// pre-existing handle is still running as a side channel.
 fn cmd_agent_alive(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (!sandbox.g_sandbox.has(.exec)) {
+        janet.janet_panicf("mast.sandbox: agent/alive? denied — `exec` capability not granted (default-deny)");
+    }
     if (argc != 1) return janet.janet_wrap_false();
     var handle_id_i32: i32 = -1;
     const t = janet.janet_type(argv[0]);
