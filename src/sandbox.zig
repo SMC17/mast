@@ -508,6 +508,10 @@ pub const REMOVED_BINDINGS = [_]RemovedBinding{
     .{ .sym = "ffi/size", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
     .{ .sym = "ffi/align", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
     .{ .sym = "ffi/context", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.4." },
+    // v1.3.7 — round-3 fuzz-harness finding: ffi/calling-conventions + ffi/trampoline survived
+    // the v1.3.4 ffi sweep. Added to close.
+    .{ .sym = "ffi/calling-conventions", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.7 (round-3 fuzz catch)." },
+    .{ .sym = "ffi/trampoline", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.7 (round-3 fuzz catch)." },
 
     // v1.3.4 — Finding #5: host process control survivors.
     .{ .sym = "os/cd", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4." },
@@ -843,6 +847,9 @@ test "G2 closure: every REMOVED_BINDINGS entry panics from Janet" {
         .{ .sym = "ffi/size", .src = "(ffi/size :u8)" },
         .{ .sym = "ffi/align", .src = "(ffi/align :u8)" },
         .{ .sym = "ffi/context", .src = "(ffi/context)" },
+        // v1.3.7 — round-3 fuzz-harness catches
+        .{ .sym = "ffi/calling-conventions", .src = "(ffi/calling-conventions)" },
+        .{ .sym = "ffi/trampoline", .src = "(ffi/trampoline)" },
         // v1.3.4 — adversarial-review finding #5: process-control survivors
         .{ .sym = "os/cd", .src = "(os/cd \"/tmp\")" },
         .{ .sym = "os/umask", .src = "(os/umask 0)" },
