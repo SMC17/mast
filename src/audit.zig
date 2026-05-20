@@ -62,7 +62,11 @@ pub const SessionAudit = struct {
         const file_path = try std.fmt.bufPrint(&file_path_buf, "{s}/{s}.jsonl\x00", .{ dir_path, sid });
 
         const c_path: [*c]const u8 = @ptrCast(file_path.ptr);
-        const fd = libc.open(c_path, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC, @as(c_uint, 0o644));
+        // O_CLOEXEC closes round-2 adversarial finding #2: without it,
+        // spawned children (agent/spawn, agent/run, gated stax-bash)
+        // inherit a writable fd to the audit log and can bypass
+        // writeJsonString by writing directly via /proc/self/fd.
+        const fd = libc.open(c_path, libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC | libc.O_CLOEXEC, @as(c_uint, 0o644));
         if (fd < 0) return error.OpenFailed;
 
         var sa = SessionAudit{
@@ -84,6 +88,12 @@ pub const SessionAudit = struct {
 
     pub fn write(self: *SessionAudit, event: []const u8, payload: anytype) !void {
         if (self.fd < 0) return;
+        // Buffer sized to comfortably hold any single event line.  Every
+        // append below goes through bounded helpers (`appendByte`,
+        // `writeJsonString`) so a long user-controlled field (eg. a
+        // 4000-char save-as path) returns NoSpaceLeft cleanly instead of
+        // overflowing the stack array.  Closes round-2 adversarial
+        // finding #4 (unbounded `buf[written] = X` near the 4096 ceiling).
         var buf: [4096]u8 = undefined;
         var written: usize = 0;
         const header = try std.fmt.bufPrint(buf[written..], "{{\"ts\":{d},\"sid\":\"{s}\",\"event\":", .{
@@ -103,8 +113,7 @@ pub const SessionAudit = struct {
             written += sep.len;
             inline for (ti.@"struct".fields, 0..) |field, i| {
                 if (i > 0) {
-                    buf[written] = ',';
-                    written += 1;
+                    try appendByte(&buf, &written, ',');
                 }
                 const field_val = @field(payload, field.name);
                 const ftype = @TypeOf(field_val);
@@ -148,18 +157,25 @@ pub const SessionAudit = struct {
                     },
                 }
             }
-            buf[written] = '}';
-            written += 1;
+            try appendByte(&buf, &written, '}');
         }
-        buf[written] = '}';
-        written += 1;
-        buf[written] = '\n';
-        written += 1;
+        try appendByte(&buf, &written, '}');
+        try appendByte(&buf, &written, '\n');
 
         const rc = libc.write(self.fd, &buf[0], written);
         if (rc < 0) return error.WriteFailed;
     }
 };
+
+/// Bounded single-byte append. Returns error.NoSpaceLeft if the buffer
+/// would overflow. Closes round-2 adversarial finding #4 — the bare
+/// `buf[written] = X` writes had no bounds check and could touch one
+/// byte past the 4096-byte stack array on long user input.
+fn appendByte(buf: *[4096]u8, written: *usize, b: u8) !void {
+    if (written.* >= buf.len) return error.NoSpaceLeft;
+    buf[written.*] = b;
+    written.* += 1;
+}
 
 // JSON-escape a string into `out`, prefixed with the opening `"` and
 // suffixed with the closing `"`. Closes adversarial-review finding #3:

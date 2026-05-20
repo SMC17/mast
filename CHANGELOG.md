@@ -6,6 +6,61 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.3.6 — round-2 adversarial review closures (2026-05-19)
+
+A second self-applied hostile-reviewer pass against the post-v1.3.4 +
+v1.3.5 state found 4 more net-new gaps + 1 doctrine update. All
+closed in v1.3.6.
+
+**Finding #1 — `ev/thread` re-instantiates a fresh Janet VM bypassing
+applyDefaultDeny.** Janet's `ev/thread` calls `janet_init()` in a new
+OS thread, creating a fresh VM with the FULL stdlib. Every removed
+binding (os/shell, slurp, ffi/*, unmarshal, asm) was reachable from
+the spawned thread. CLOSED: `ev/thread`, `ev/thread-chan`,
+`ev/spawn-thread` added to `REMOVED_BINDINGS` under new
+`DenyCategory.threading`. `ev/go` is single-thread and inherits the
+gated env — intentionally NOT removed.
+
+**Finding #2 — spawned children inherit the audit-log fd; bypass of
+`writeJsonString`.** Without `O_CLOEXEC`, children of `agent/spawn`,
+`agent/run`, and `os/shell` inherit the JSONL log fd; the child can
+write raw bytes via `/proc/self/fd/<n>` and forge events past the
+escape logic. CLOSED: `O_CLOEXEC` on `audit.zig::init`'s open call,
+`main.zig::load_init_janet`'s open call, and `fcntl(F_SETFD,
+FD_CLOEXEC)` on the `cmd_agent_spawn` pipe-read end.
+
+**Finding #3 — `list-buffers` print path bypassed `sanitize_into`
+(round-1 #4 only half-closed).** v1.3.4 added `sanitize_into` only
+inside `tui.render_to_buf`; the line-REPL `list-buffers` and
+`M-x display` paths printed buffer names unsanitized. PoC:
+`M-x new-buffer "$(printf 'a\x1b]52;c;...\x07')"` then
+`M-x list-buffers` → OSC 52 clipboard hijack via the terminal.
+CLOSED: new `sanitizeNameInto` helper canonicalizes buffer names at
+the write site (`MAST_NEWBUFFER_SENTINEL`, `MAST_SAVEAS_SENTINEL`),
+so every consumer sees safe bytes. **Doctrine:** sanitize at the
+trust boundary, not scattered across render sites.
+
+**Finding #4 — `audit.zig::write` had unbounded `buf[written] = X`
+writes near the 4096 ceiling.** `writeJsonString` could succeed at
+exactly `out.len == 4096`, then the next `buf[4096] = '}'` was one
+byte past the stack array (UB). PoC: `M-x save-as <~4000-char
+path>`. CLOSED: new `appendByte(buf, &written, b)` bounded helper
+returns `error.NoSpaceLeft` on overflow; every bare-array-write site
+in `audit.zig::write` converted. Long inputs now surface as a
+write-failed error instead of corrupting adjacent stack slots.
+
+**Finding #5 — §7 manifest doctrine.** Doc-only: the v2 capability-
+manifest plan must explicitly say source-scan is unsound. With
+`compile` + `parser/produce` retained (intentional per residual
+#19), a script can build code at runtime that never appears as a
+literal in init.janet. Manifest must be a runtime grant against
+an empty default-deny env. Threat model §6 #25 updated.
+
+**REMOVED_BINDINGS grows 65 → 68 entries** (the +3 ev-thread family).
+The G2 closure property test now iterates 68 entries × 9 probe
+categories × 200 random cap sets = 122,400 Janet invocations
+confirming the panic invariant.
+
 ### v1.3.5 — resource quota via SIGALRM + janet_interpreter_interrupt (2026-05-19)
 
 Closes the long-standing v1.3.0 §honest-residuals "no resource quotas"
