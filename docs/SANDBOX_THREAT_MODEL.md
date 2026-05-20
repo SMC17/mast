@@ -501,6 +501,37 @@ found four more net-new gaps. All closed in v1.3.6.
     empty default-deny env; source scan is NEVER sufficient. v0.4
     design.
 
+**v1.3.9 (2026-05-19) — round-4 adversarial review of the fix code.**
+Round 4 (`research/2026-05-19-adversarial-review-round4.md`) audited
+the v1.3.4–v1.3.8 fix code itself. Found 2 critical bugs in MY OWN
+implementations + 1 regression of round-2 #3. All closed.
+
+26. ~~**SIGALRM quota leaked `auto_suspend`** — one timeout
+    permanently broke the session.~~ **CLOSED 2026-05-19 (v1.3.9):**
+    `g_alarm_fires` atomic counter in the SIGALRM handler;
+    `janet_dostring_quota` drains the count after each eval by
+    calling `janet_interpreter_interrupt_handled` once per fire.
+    `vm->auto_suspend` returns to 0 between evals.
+    `tests/quota_integration.sh` Case 4 added as regression test
+    (multi-expression session that pre-fix would silently fail).
+27. ~~**Wall-clock quota only bounded Janet bytecode, not blocking
+    cfunctions** — `agent/wait` could block for the full child
+    lifetime regardless of `MAST_EVAL_TIMEOUT_SEC`.~~ **CLOSED
+    2026-05-19 (v1.3.9):** `cmd_agent_wait` snapshots `g_alarm_fires`
+    at entry and checks it between poll iterations; if the handler
+    bumped it during this call, the cfunction panics with
+    "interrupted by MAST_EVAL_TIMEOUT_SEC quota."
+28. ~~**Regression of round-2 #3 in `MAST_NEWBUFFER_SENTINEL` +
+    `MAST_SAVEAS_SENTINEL` echo paths.**~~ **CLOSED 2026-05-19
+    (v1.3.9):** Both echo lines now use the sanitized buffer instead
+    of `parsed.args[0]` raw; same OSC 52 vector closed at the
+    second stdout sink.
+29. ~~**`agent/spawn` name sanitizer was inconsistent with
+    `sanitizeNameInto`** — stripped UTF-8 entirely while the
+    canonical sanitizer preserved it.~~ **CLOSED 2026-05-19
+    (v1.3.9):** converged on the looser policy (case-by-case switch
+    that preserves UTF-8, strips only control bytes).
+
 ---
 
 ## 7. Out of scope for v1

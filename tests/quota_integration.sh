@@ -115,6 +115,30 @@ else
     head -5 "$audit_file" 2>/dev/null | sed 's/^/        /'
 fi
 
+# ─── Case 4: subsequent eval after a timeout still works ─────────────
+#
+# Round-4 adversarial finding #1: SIGALRM quota leaks auto_suspend.
+# Pre-fix: ONE timeout left vm->auto_suspend == 1 for the rest of the
+# process, so every subsequent eval interrupted at the first bytecode
+# op.  This case is the load-bearing regression test for that fix:
+#   1. trigger the quota with (while true 1)
+#   2. immediately follow with (+ 2 40)
+#   3. assert the second eval returns → 42, NOT another "interrupted"
+#
+# The original quota_integration.sh missed this because it piped one
+# expression then EOFed.  This case sends multiple expressions in a
+# single session.
+
+multi_out=$(printf '(while true 1)\n(+ 2 40)\nexit\n' | timeout 10 \
+    env MAST_EVAL_TIMEOUT_SEC=2 "$MAST_BIN" 2>&1) || true
+# The (+ 2 40) line must return → 42 AFTER the interrupted (while ...).
+if echo "$multi_out" | grep -qE '→ 42( |$)'; then
+    pass "Round-4 #1: post-timeout eval (+ 2 40) returns → 42 (auto_suspend drained)"
+else
+    fail "Round-4 #1: post-timeout (+ 2 40) did not return → 42 — auto_suspend leak NOT closed"
+    echo "        got tail: $(echo "$multi_out" | tail -8 | sed 's/^/        /')"
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────────
 echo ""
 if [ "$n_fail" -gt 0 ]; then
