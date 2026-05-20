@@ -154,6 +154,21 @@ pub fn build(b: *std.Build) void {
     quota_integration.step.dependOn(b.getInstallStep());
     test_step.dependOn(&quota_integration.step);
 
+    // v1.3.7 — round-3-prescribed sandbox fuzz harness. Walks every
+    // binding in root-env post-applyDefaultDeny, calls each cfunction
+    // with no args, and FAILS if any dangerous-looking symbol returned
+    // a value without panic. Catches transitive re-exposures via
+    // module/find / require that source-reading rounds 1+2 might miss.
+    const sandbox_fuzz = b.addSystemCommand(&.{
+        "bash",
+        "tools/sandbox-fuzz.sh",
+    });
+    sandbox_fuzz.setEnvironmentVariable("MAST_BIN", b.getInstallPath(.bin, "mast"));
+    sandbox_fuzz.step.dependOn(b.getInstallStep());
+    const sandbox_fuzz_step = b.step("sandbox-fuzz", "Round-3 fuzz harness — diff root-env cfuncs against REMOVED_BINDINGS");
+    sandbox_fuzz_step.dependOn(&sandbox_fuzz.step);
+    test_step.dependOn(&sandbox_fuzz.step);
+
     // `zig build doctest` — README claim verification.
     //
     // Same discipline as zig-cobs / zig-frame-protocol / zig-graph /

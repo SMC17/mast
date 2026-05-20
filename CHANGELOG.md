@@ -6,6 +6,44 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.3.7 — round-3 fuzz harness + ffi/calling-conventions + ffi/trampoline (2026-05-19)
+
+Round 2 prescribed a fuzz harness that walks `(all-bindings root-env)`
+post-`applyDefaultDeny`, calls each cfunction with no args, and FAILS
+if any dangerous-looking symbol returned a value without panic. This
+release ships it as `tools/sandbox-fuzz.{janet,sh}` and wires it into
+`zig build test` (and as standalone `zig build sandbox-fuzz`).
+
+**First run found 2 more FFI symbols** that round 2 missed when
+enumerating the ffi namespace:
+- `ffi/calling-conventions` (returns the list of supported calling
+  conventions — read-only metadata, but leaks FFI's presence)
+- `ffi/trampoline` (returns a pointer to a JIT trampoline)
+
+Both added to `REMOVED_BINDINGS`. `REMOVED_BINDINGS` grows 68 → 70.
+
+**Fuzz outcome reporting:**
+
+```
+=== mast sandbox-fuzz (round-3 prescribed) ===
+  host=16 returned=45 panicked-mast=71 panicked-arity=242 panicked-other=
+PASS: no dangerous cfunction returned a value from default-deny env.
+```
+
+- `host` = mast-host cfunctions (stax-*/buffer-*/agent-*), expected
+- `returned` = pure-function Janet stdlib (+, length, string, etc.)
+  that operate on data only, no syscall — benign
+- `panicked-mast` = removed-binding panics fired correctly (our gates)
+- `panicked-arity` = Janet's own arg-validation fired before our gate
+  could run — these are functions that need args; fuzz didn't probe
+  with valid args (known limitation, documented in the script)
+- `panicked-other` = neither — would flag for review
+
+**Doctrine:** the fuzz harness catches transitive re-exposures via
+`module/find` / `require` that source-reading reviews would miss. The
+round-3 prescription is now alive as a continuous check, not a
+one-time audit.
+
 ### v1.3.6 — round-2 adversarial review closures (2026-05-19)
 
 A second self-applied hostile-reviewer pass against the post-v1.3.4 +
