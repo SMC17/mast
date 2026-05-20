@@ -142,6 +142,18 @@ pub fn build(b: *std.Build) void {
     integration_smoke.step.dependOn(b.getInstallStep());
     test_step.dependOn(&integration_smoke.step);
 
+    // v1.3.5 wall-clock resource quota integration test.
+    // Spawns the shipped binary with MAST_EVAL_TIMEOUT_SEC=2, feeds it
+    // an infinite loop, asserts the editor returns within ~2s with the
+    // documented "interrupted" panic message and exit status 0.
+    const quota_integration = b.addSystemCommand(&.{
+        "bash",
+        "tests/quota_integration.sh",
+    });
+    quota_integration.setEnvironmentVariable("MAST_BIN", b.getInstallPath(.bin, "mast"));
+    quota_integration.step.dependOn(b.getInstallStep());
+    test_step.dependOn(&quota_integration.step);
+
     // `zig build doctest` — README claim verification.
     //
     // Same discipline as zig-cobs / zig-frame-protocol / zig-graph /
