@@ -238,6 +238,123 @@ else
     echo "        got: $(echo "$stax_search_out" | tail -5)"
 fi
 
+# ─── Check 9: README documents the multi-buffer surface (v1.3.0) ─────────
+#
+# README §v0.2 surface names the multi-buffer ring + M-x verbs. We probe
+# the lifecycle directly: empty list → create two buffers → list shows two
+# → next-buffer cycles → switch-buffer 0 returns to first.
+mb_out=$(printf 'list-buffers\nnew-buffer alpha\nnew-buffer beta\nbuffer-count\nlist-buffers\nswitch-buffer 0\nbuffer-name\nnext-buffer\nbuffer-name\nexit\n' \
+    | "$MAST_BIN" 2>&1)
+if echo "$mb_out" | grep -q "no buffers"; then
+    pass "README §v0.2 surface: empty buffer ring reports '(no buffers …)'"
+else
+    fail "empty buffer ring did not produce '(no buffers …)'"
+fi
+if echo "$mb_out" | grep -q "buffers (2)"; then
+    pass "README §v0.2 surface: two new-buffer calls produce 'buffers (2)'"
+else
+    fail "list-buffers after two new-buffer did not report 'buffers (2)'"
+fi
+if echo "$mb_out" | grep -qE '→ alpha\b'; then
+    pass "README §v0.2 surface: switch-buffer 0 + buffer-name returns 'alpha'"
+else
+    fail "switch-buffer 0 cycle did not surface buffer name 'alpha'"
+    echo "        got: $(echo "$mb_out" | grep '→' | head -4)"
+fi
+if echo "$mb_out" | grep -qE '→ beta\b'; then
+    pass "README §v0.2 surface: next-buffer cycles forward to 'beta'"
+else
+    fail "next-buffer did not cycle to 'beta'"
+fi
+
+# ─── Check 10: agent-run cfunction (README §v0.2 surface) ────────────────
+#
+# README quickstart shows `(agent/spawn "ls -la /tmp")` and §v0.2 surface
+# names `M-x agent-run <cmd>` as the sync variant. We probe the sync verb
+# with a fast deterministic cmd (`echo`) and confirm:
+#   - the result is the new buffer's integer index
+#   - the buffer list grows by one
+#   - display renders the captured output
+agent_out=$(printf '(agent/run "echo doctest-marker-9f2c")\nbuffer-count\ndisplay\nexit\n' \
+    | "$MAST_BIN" 2>&1)
+if echo "$agent_out" | grep -qE '→ 0\b'; then
+    pass "README §v0.2 surface: agent/run returns new buffer index 0"
+else
+    fail "agent/run did not return new buffer index 0"
+fi
+if echo "$agent_out" | grep -q "doctest-marker-9f2c"; then
+    pass "README §v0.2 surface: agent/run captures cmd stdout into :agent buffer"
+else
+    fail "agent/run did not capture documented stdout marker"
+fi
+
+# ─── Check 11: agent/spawn async lifecycle ────────────────────────────────
+#
+# v1.3.0 release notes name (agent/spawn / poll / wait) as the v0.3
+# async surface. Probe the full handle lifecycle:
+#   - spawn returns integer handle (0 for the first spawn)
+#   - wait blocks and returns exit status integer
+#   - display shows captured stdout
+spawn_out=$(printf '(def h (agent/spawn "echo async-doctest-marker"))\n(agent/wait h)\n(agent/alive? h)\ndisplay\nexit\n' \
+    | "$MAST_BIN" 2>&1)
+if echo "$spawn_out" | grep -qE '→ 0\b'; then
+    pass "v1.3.0 §async-agent: (agent/spawn cmd) returns handle 0"
+else
+    fail "(agent/spawn cmd) did not return handle 0"
+fi
+if echo "$spawn_out" | grep -q "async-doctest-marker"; then
+    pass "v1.3.0 §async-agent: (agent/wait h) + display shows captured stdout"
+else
+    fail "agent/spawn + agent/wait did not capture documented stdout marker"
+fi
+if echo "$spawn_out" | grep -qE '→ false\b'; then
+    pass "v1.3.0 §async-agent: (agent/alive? h) returns false after wait"
+else
+    fail "(agent/alive? h) after wait did not report false"
+fi
+
+# ─── Check 12: --tui CLI flag exists and launches alt-screen ──────────────
+#
+# README quick-start documents: ./zig-out/bin/mast --tui examples/init.janet
+# We can't drive a real terminal interactively from this script, but we
+# CAN confirm that:
+#   - the binary accepts --tui without erroring out
+#   - the output contains an ANSI alt-screen-enter sequence (0x1b [ ? 1049 h)
+#   - a final 'q' keystroke exits cleanly with status 0
+tui_out=$(printf 'q' | "$MAST_BIN" --tui /etc/hostname 2>&1)
+tui_status=$?
+if [ "$tui_status" -eq 0 ]; then
+    pass "README quick-start: 'mast --tui <file>' exits cleanly on 'q'"
+else
+    fail "'mast --tui <file>' exited with status $tui_status"
+fi
+if echo "$tui_out" | grep -qF '[?1049h'; then
+    pass "README quick-start: '--tui' enters the alt-screen (ANSI 1049h)"
+else
+    fail "'mast --tui' did not emit alt-screen-enter (1049h)"
+fi
+
+# ─── Check 13: G2 removed-binding panic observable from user-script ───────
+#
+# v1.3.0 release notes claim 31 dangerous Janet bindings are removed. We
+# probe one representative from each major category to confirm the panic
+# message contains the documented "REMOVED" marker.
+g2_out=$(printf '(try (slurp "/etc/hostname") ([err] err))\nexit\n' \
+    | "$MAST_BIN" 2>&1)
+if echo "$g2_out" | grep -q "REMOVED"; then
+    pass "v1.3.0 §G2: (slurp ...) panics with documented REMOVED marker"
+else
+    fail "(slurp ...) did not produce the documented REMOVED panic"
+fi
+
+g2_env_out=$(printf '(try (os/getenv "HOME") ([err] err))\nexit\n' \
+    | "$MAST_BIN" 2>&1)
+if echo "$g2_env_out" | grep -q "REMOVED"; then
+    pass "v1.3.0 §residual-#6: (os/getenv ...) panics with documented REMOVED marker"
+else
+    fail "(os/getenv ...) did not produce the documented REMOVED panic"
+fi
+
 # ─── Summary ───────────────────────────────────────────────────────────────
 echo ""
 echo "=== summary ==="

@@ -1,8 +1,8 @@
 # Editor Substrate — Architecture Sketch
 
-**Working name:** TBD. Working directory: `<private-substrate>/`. Internal handle: "the substrate" until a Lineage-compatible name lands.
+**Working name:** TBD. Working directory: `~/mac-mining/editor-substrate/`. Internal handle: "the substrate" until a Lineage-compatible name lands.
 **Doctrine anchors:** `feedback_cli_first_mcp_dead.md` (Zig CLIs as substrate, Elixir/BEAM orchestration), `feedback_no_paid_api_keys.md` (subscription-CLI auth + open weights), `project_three_os_mesh.md` (per-node mechanical sympathy), `project_sovereign_hardware_aether.md` (anti-cloud, supplier-independent intelligence), `feedback_foundation_first.md` (bottom-up; no upper layer before its substrate is solid), `feedback_no_sovereign_coinage.md` (no new sovereign-X names).
-**Companion essay:** `https://sunlitmoon.online/posts/apple-next-pixar-emacs` (DRAFT). The essay states the thesis. This file is the engineering substrate the essay depends on.
+**Companion essay:** `~/blog/content/posts/apple-next-pixar-emacs.md` (DRAFT). The essay states the thesis. This file is the engineering substrate the essay depends on.
 **Status:** scoping sketch, 2026-05-13. First-ship target Q3 2026 per the essay's Bet 1.
 
 ---
@@ -134,6 +134,6 @@ Active scoping. No commits yet. First commit gated on:
 2. Buffer-protocol binding spec (draft by 2026-07-15).
 3. First-ship deliverable §6 above scoped into milestones small enough to ship weekly.
 
-The companion blog essay is in draft (`https://sunlitmoon.online/posts/apple-next-pixar-emacs`). The strategic memo is in draft (`<private-substrate>/STRATEGIC_POSITION.md`).
+The companion blog essay is in draft (`~/blog/content/posts/apple-next-pixar-emacs.md`). The strategic memo is in draft (`~/mac-mining/editor-substrate/STRATEGIC_POSITION.md`).
 
 No public push until the v0.1 commit lands.
