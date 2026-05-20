@@ -32,6 +32,7 @@ const libc = @cImport({
     @cInclude("sys/wait.h");
     @cInclude("signal.h");
     @cInclude("poll.h");
+    @cInclude("sys/stat.h");
 });
 
 const Allocator = std.mem.Allocator;
@@ -1504,6 +1505,24 @@ fn load_init_janet(allocator: Allocator, env: *janet.JanetTable, audit: *Session
     if (fd < 0) return error.InitFileMissing;
     defer _ = libc.close(fd);
 
+    // 64 KB cap on init.janet. If the file is larger, read returns the
+    // first 65535 bytes silently — pre-v1.3.7 we'd happily eval a truncated
+    // form. Now: stat the file first and emit a clear warning if the
+    // truncation actually happens, so users notice they need to split
+    // their config across multiple files (or raise the cap).
+    // Closes round-2 adversarial-review residual "load_init_janet 64KB
+    // silent-truncation edge."
+    var st: libc.struct_stat = undefined;
+    if (libc.fstat(fd, &st) == 0) {
+        const size: usize = @intCast(st.st_size);
+        if (size > 65535) {
+            print("init.janet WARNING: file is {d} bytes; mast caps init.janet at 65535 bytes, " ++
+                  "trailing {d} bytes will NOT be evaluated. Split into multiple files or " ++
+                  "raise the cap in src/main.zig::load_init_janet.\n",
+                  .{ size, size - 65535 });
+            try audit.write("init-janet-truncated", .{ .path = path, .actual_bytes = size, .max_bytes = 65535 });
+        }
+    }
     var contents = try allocator.alloc(u8, 65536); // 64 KB cap on init.janet
     defer allocator.free(contents);
     const rc = libc.read(fd, contents.ptr, contents.len - 1);

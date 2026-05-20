@@ -513,6 +513,21 @@ pub const REMOVED_BINDINGS = [_]RemovedBinding{
     .{ .sym = "ffi/calling-conventions", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.7 (round-3 fuzz catch)." },
     .{ .sym = "ffi/trampoline", .stub = panic_removed_ffi, .doc = "mast-sandbox: REMOVED in v1.3.7 (round-3 fuzz catch)." },
 
+    // v1.3.8 — round-2 honest-residual closure: selective os/* metadata.
+    // Of the 17 surviving os/* bindings round-2 enumerated, 3 have real
+    // (small but real) impact and are removed. The other 14 (os/time /
+    // os/date / os/strftime / os/clock / os/cryptorand / os/isatty /
+    // os/arch / os/compiler / os/cpu-count / os/perm-string / os/perm-int /
+    // os/mktime / os/sleep / os/getpid) are intentionally retained as
+    // pure-metadata or bounded-by-quota.
+    //   - os/cwd: leaks $HOME via the working-directory path
+    //   - os/setlocale: process-wide state mutation (locale affects
+    //     number/date formatting for the whole mast process)
+    //   - os/which: program-discovery info leak (which binaries are on PATH)
+    .{ .sym = "os/cwd", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.8 (leaks $HOME path)." },
+    .{ .sym = "os/setlocale", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.8 (process-wide state mutation)." },
+    .{ .sym = "os/which", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.8 (program-discovery info leak)." },
+
     // v1.3.4 — Finding #5: host process control survivors.
     .{ .sym = "os/cd", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4." },
     .{ .sym = "os/umask", .stub = panic_removed_process_control, .doc = "mast-sandbox: REMOVED in v1.3.4." },
@@ -850,6 +865,10 @@ test "G2 closure: every REMOVED_BINDINGS entry panics from Janet" {
         // v1.3.7 — round-3 fuzz-harness catches
         .{ .sym = "ffi/calling-conventions", .src = "(ffi/calling-conventions)" },
         .{ .sym = "ffi/trampoline", .src = "(ffi/trampoline)" },
+        // v1.3.8 — round-2 honest-residual closure: selective os/* metadata
+        .{ .sym = "os/cwd", .src = "(os/cwd)" },
+        .{ .sym = "os/setlocale", .src = "(os/setlocale \"C\")" },
+        .{ .sym = "os/which", .src = "(os/which)" },
         // v1.3.4 — adversarial-review finding #5: process-control survivors
         .{ .sym = "os/cd", .src = "(os/cd \"/tmp\")" },
         .{ .sym = "os/umask", .src = "(os/umask 0)" },

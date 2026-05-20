@@ -6,6 +6,38 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.3.8 — init.janet truncation warning + selective os/* closures (2026-05-19)
+
+Two of the round-2 honest-residuals named in v1.3.6 are now closed.
+
+**`init.janet` 64KB truncation now WARNS instead of silently truncating.**
+Pre-v1.3.8 `load_init_janet` capped at 65535 bytes and silently
+truncated longer files. Now: `fstat` the file first; if size > 65535,
+print a clear warning AND write `init-janet-truncated` to the audit log
+with `actual_bytes` + `max_bytes`. Users will notice they need to split
+their config or raise the cap. Closes round-2 residual
+"64KB init.janet silent-truncation edge."
+
+**3 selective `os/*` closures** out of the 17 round-2 enumerated
+surviving metadata bindings. The other 14 are intentionally retained
+as pure-metadata (`os/time` / `os/date` / `os/strftime` / `os/clock` /
+`os/cryptorand` / `os/isatty` / `os/arch` / `os/compiler` /
+`os/cpu-count` / `os/perm-string` / `os/perm-int` / `os/mktime`) or
+bounded-by-quota (`os/sleep`) or already-low-risk (`os/getpid` —
+process pid is visible in /proc anyway). The 3 removed are:
+
+- **`os/cwd`** — leaks the `$HOME` path via current-working-directory
+  string (information leak, especially under STRICT mode).
+- **`os/setlocale`** — process-wide state mutation (changing the locale
+  affects number/date formatting for the whole mast process,
+  including the audit log).
+- **`os/which`** — program-discovery info leak (`(os/which "kubectl")`
+  tells the script which binaries are on PATH).
+
+`REMOVED_BINDINGS` grows 70 → 73. Sandbox-fuzz post-fix:
+`host=16 returned=42 panicked-mast=74 panicked-arity=241 panicked-other=`
+— 0 violations.
+
 ### v1.3.7 — round-3 fuzz harness + ffi/calling-conventions + ffi/trampoline (2026-05-19)
 
 Round 2 prescribed a fuzz harness that walks `(all-bindings root-env)`
