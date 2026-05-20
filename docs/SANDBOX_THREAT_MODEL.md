@@ -540,22 +540,24 @@ Net-new escalation paths: **zero**. v1.3.10 closes 4 of round 5's 5
 findings; #30 (shell-cfunction quota propagation) is named as an
 honest residual with v1.4 implementation path.
 
-30. **Shell-cfunction quota bypass (honest residual).** `gated_os_shell`,
-    `gated_stax_bash`, and `cmd_agent_run` block in `libc.system` /
-    `libc.popen`+`fread`. glibc's `system(3)` is TEMP_FAILURE_RETRY
-    style — its internal `waitpid` swallows EINTR. SIGALRM bumps
-    `g_alarm_fires` and calls `janet_interpreter_interrupt`, but the
-    VM is parked in the cfunction; the interrupt only takes effect
-    when bytecode resumes (after the shell exits).
+30. ~~**Shell-cfunction quota bypass.**~~ **CLOSED 2026-05-20 (v1.4.0):**
+    `sandbox.g_shell_runner` function-pointer hook installed by
+    `main.zig::runShellExitOnly`. `gated_os_shell` + `gated_stax_bash`
+    now route through it. The runner does `fork`+`execv` then a poll
+    loop with `waitpid(WNOHANG)` + `usleep(50ms)`, checking
+    `g_alarm_fires` between iterations. On quota fire: `SIGTERM` the
+    child, blocking-reap via `waitpid`, write `shell-quota-interrupt`
+    audit event, return `-1` sentinel. The legacy `libc.system`
+    fallback remains for early-startup / test contexts when no host
+    runner is installed.
     PoC (`MAST_EVAL_TIMEOUT_SEC=2`):
-    `(os/shell "sleep 9999")` blocks for 9999 seconds despite quota.
-    Round-4 #2 fixed `cmd_agent_wait` only; these three sibling
-    sites were missed. **v1.4 path:** replace `libc.system` / `popen`
-    in all three sites with `fork`+`execv`+`poll`-on-stdout +
-    `waitpid(WNOHANG)` loop bounded by `g_alarm_fires`, mirroring the
-    `cmd_agent_wait` pattern. ~50 lines per site × 3 sites.
-    **Severity:** Liveness, not security. Exec-holding callers can
-    DoS the editor; no-exec callers are already gated out.
+    `(os/shell "sleep 9999")` now returns `-1` in ~2 seconds (was:
+    blocked for 9999s). `tests/quota_integration.sh` Case 5+6
+    pin this. **`cmd_agent_run` (libc.popen path) still uses popen —
+    deferred to v1.4.1** because the popen→fork+exec+capture
+    refactor is substantially larger than the exit-only path and the
+    `agent/spawn` async surface is the recommended way to capture
+    stdout under quota anyway.
 31. ~~**`g_alarm_fires` TOCTOU between `alarm(0)` and atomic load.**~~
     **CLOSED 2026-05-19 (v1.3.10):** `janet_dostring_quota` now uses
     `@atomicRmw(.Xchg)` to read-and-zero in a single operation. Any
