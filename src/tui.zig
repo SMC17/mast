@@ -480,6 +480,56 @@ fn captureRow(state: *FrameState, allocator: std.mem.Allocator, row_idx: usize, 
     state.row_last[row_idx] = allocator.dupe(u8, bytes) catch null;
 }
 
+/// Row-granular emission: diff `current` against the cached per-row
+/// snapshot, then write ONLY the changed rows preceded by cursor
+/// positioning + CLEAR_LINE. Returns the number of rows emitted (0 if
+/// the frame is unchanged).
+///
+/// On full_redraw: emits the entire frame as-is (same as
+/// `emit_with_damage`) AND captures the row snapshot for future diffs.
+/// This is the row-granular wrapper around `diff_rows` (which is the
+/// pure diff logic with no stdout side-effect).
+///
+/// Callers that want frame-level diff (cheaper to compute, larger
+/// emit) can continue using `emit_with_damage`. Per-row is the v1.3.9
+/// path for terminals where the unchanged-row cost dominates the
+/// changed-row cost (typically >24×80).
+pub fn emit_with_row_damage(
+    state: *FrameState,
+    allocator: std.mem.Allocator,
+    current: []const u8,
+) usize {
+    // On full redraw: emit everything + snapshot every row.
+    if (state.full_redraw) {
+        write_str(current);
+        // Capture each row to the cache so future calls can diff.
+        var changed: std.ArrayList(usize) = .empty;
+        defer changed.deinit(allocator);
+        diff_rows(state, allocator, current, &changed);
+        // diff_rows clears full_redraw at the end.
+        return changed.items.len; // first-call: equals row count
+    }
+
+    var changed: std.ArrayList(usize) = .empty;
+    defer changed.deinit(allocator);
+    diff_rows(state, allocator, current, &changed);
+    if (changed.items.len == 0) return 0;
+
+    // Emit each changed row with cursor positioning.  Row indices are
+    // 0-based in our model, 1-based in ANSI cursor escapes.  Each row
+    // includes its trailing \r\n.
+    for (changed.items) |row_idx| {
+        if (row_idx >= FrameState.MAX_ROWS) continue;
+        const row_bytes = state.row_last[row_idx] orelse continue;
+        var cursor_buf: [32]u8 = undefined;
+        const cursor_esc = std.fmt.bufPrint(&cursor_buf, "\x1b[{d};1H", .{row_idx + 1}) catch continue;
+        write_str(cursor_esc);
+        write_str(CLEAR_LINE);
+        write_str(row_bytes);
+    }
+    return changed.items.len;
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────
 //
 // terminalSize / RawMode / readKey are termios-dependent and hard to test
@@ -507,6 +557,15 @@ test "render_to_buf produces deterministic output for the empty-buffer case" {
     try std.testing.expectEqualSlices(u8, out1.items, out2.items);
     try std.testing.expect(out1.items.len > 0);
 }
+
+// NOTE: emit_with_row_damage() calls write_str() which is stdout — under
+// the Zig test runner's --listen=- transport this deadlocks (same
+// pattern that fixed the v1.3.2 FrameState test). The pure logic
+// (diff_rows + state-cache mutation) is exercised by the three
+// `diff_rows: ...` tests above; the row-emit side-effect is smoke-tested
+// via interactive TUI use rather than in-source tests. v0.4 will
+// refactor emit_with_row_damage to take a writer parameter so it's
+// hermetically testable.
 
 test "sanitize_into: ESC and control bytes become ? (adversarial #4 guard)" {
     const allocator = std.testing.allocator;
