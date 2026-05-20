@@ -83,6 +83,29 @@ fn buf_str(out: *std.ArrayList(u8), allocator: std.mem.Allocator, s: []const u8)
     out.appendSlice(allocator, s) catch {};
 }
 
+/// Sanitize untrusted bytes for terminal display. Replaces every byte
+/// that could initiate an ANSI escape sequence (ESC=0x1b), any other
+/// C0 control byte except `\t` (0x09), `\n` (0x0a), `\r` (0x0d), and
+/// the DEL byte (0x7f), with `?`. Bytes 0x80–0xff (UTF-8 continuation)
+/// pass through — we trust the terminal to render UTF-8 safely.
+///
+/// Closes adversarial-review finding #4: buffer name + buffer contents
+/// (which can carry attacker-controlled bytes via agent-spawn stdout
+/// or M-x save-as paths) reached the terminal unsanitized, enabling
+/// clipboard hijack via OSC 52 (`\x1b]52;c;<b64>\x07`) and viewport
+/// clobber via `\x1b[2J`. Now: ESC and friends become `?` so the
+/// sequences cannot terminate.
+pub fn sanitize_into(out: *std.ArrayList(u8), allocator: std.mem.Allocator, raw: []const u8) void {
+    for (raw) |c| {
+        const safe: u8 = switch (c) {
+            0x09, 0x0a, 0x0d => c, // tab, newline, carriage return — render needs these
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f, 0x7f => '?',
+            else => c,
+        };
+        out.append(allocator, safe) catch return;
+    }
+}
+
 fn buf_cursor(out: *std.ArrayList(u8), allocator: std.mem.Allocator, row: usize, col: usize) void {
     var buf: [32]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "\x1b[{d};{d}H", .{ row, col }) catch return;
@@ -221,7 +244,7 @@ pub fn render_to_buf(
                     const line_text = b.contents[line_start..line_end];
                     const max_cols: usize = if (dims.cols > 8) @intCast(dims.cols - 8) else 0;
                     const visible_len = @min(line_text.len, max_cols);
-                    buf_str(out, allocator, line_text[0..visible_len]);
+                    sanitize_into(out, allocator, line_text[0..visible_len]);
                     buf_str(out, allocator, "\r\n");
                     rendered += 1;
                 }
@@ -236,7 +259,7 @@ pub fn render_to_buf(
             buf_str(out, allocator, DIM);
             buf_str(out, allocator, prefix);
             buf_str(out, allocator, RESET);
-            buf_str(out, allocator, b.contents[line_start..]);
+            sanitize_into(out, allocator, b.contents[line_start..]);
             buf_str(out, allocator, "\r\n");
             rendered += 1;
         }
@@ -269,7 +292,9 @@ pub fn render_to_buf(
         .{ current_idx, total_buffers, kind_label, buf_name, dirty_mark, buf_size, scroll },
     ) catch " mast ";
     const status_visible_len = @min(status.len, dims.cols);
-    buf_str(out, allocator, status[0..status_visible_len]);
+    // Sanitize the whole status line because buf_name (user-controllable via
+    // M-x save-as / new-buffer / agent-run cmd) flows into it.
+    sanitize_into(out, allocator, status[0..status_visible_len]);
     // Pad to full width so REVERSE highlights the whole bar.
     var pad: usize = if (dims.cols > status_visible_len) dims.cols - status_visible_len else 0;
     while (pad > 0) : (pad -= 1) buf_str(out, allocator, " ");
@@ -481,6 +506,43 @@ test "render_to_buf produces deterministic output for the empty-buffer case" {
     render_to_buf(&out2, allocator, null, 0, 0, 0, null);
     try std.testing.expectEqualSlices(u8, out1.items, out2.items);
     try std.testing.expect(out1.items.len > 0);
+}
+
+test "sanitize_into: ESC and control bytes become ? (adversarial #4 guard)" {
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    // OSC 52 clipboard-injection PoC bytes: ESC ] 5 2 ; c ; <b64> BEL
+    var evil = [_]u8{ 0x1b, ']', '5', '2', ';', 'c', ';', 'a', 'b', 'c', 0x07, 'X' };
+    sanitize_into(&out, allocator, &evil);
+    // ESC and BEL (0x07) must be replaced; printable bytes pass through.
+    try std.testing.expectEqual(@as(u8, '?'), out.items[0]);
+    try std.testing.expectEqual(@as(u8, ']'), out.items[1]);
+    try std.testing.expectEqual(@as(u8, '?'), out.items[10]); // BEL
+    try std.testing.expectEqual(@as(u8, 'X'), out.items[11]);
+    // No raw ESC anywhere in the output.
+    for (out.items) |c| try std.testing.expect(c != 0x1b);
+    for (out.items) |c| try std.testing.expect(c != 0x07);
+}
+
+test "sanitize_into: preserves tab newline carriage-return + UTF-8 high-bit bytes" {
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    var input = [_]u8{ 'a', 0x09, 'b', 0x0a, 'c', 0x0d, 0xc3, 0xa9 }; // a\tb\nc\rÉ (UTF-8 for é = 0xc3 0xa9)
+    sanitize_into(&out, allocator, &input);
+    try std.testing.expectEqualSlices(u8, &input, out.items);
+}
+
+test "sanitize_into: DEL byte (0x7f) becomes ?" {
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var input = [_]u8{ 'x', 0x7f, 'y' };
+    sanitize_into(&out, allocator, &input);
+    try std.testing.expectEqualSlices(u8, "x?y", out.items);
 }
 
 test "diff_rows: first call reports every row changed; second identical call reports none" {
