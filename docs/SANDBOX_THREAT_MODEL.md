@@ -441,6 +441,66 @@ intentional residual.
     full hour. Now: every `agent/*` operation gates on `exec`,
     matching the capability that created the handle.
 
+**v1.3.6 (2026-05-19) — round-2 adversarial review.** A second
+self-applied hostile-reviewer pass (`research/2026-05-19-adversarial-review-round2.md`)
+found four more net-new gaps. All closed in v1.3.6.
+
+21. ~~**`ev/thread` re-instantiates a fresh Janet VM with the full
+    stdlib.**~~ **CLOSED 2026-05-19 (v1.3.6):** `ev/thread`,
+    `ev/thread-chan`, `ev/spawn-thread` removed via panic stubs under
+    new `DenyCategory.threading`. Janet's `ev/thread` calls
+    `janet_init()` in a new OS thread, creating a fresh VM that has
+    NONE of the `applyDefaultDeny` protection installed against the
+    main thread's env. Every removed binding — `os/shell`, `slurp`,
+    `ffi/*`, `unmarshal`, `asm` — was fully reachable from the
+    spawned thread. `ev/go` is single-thread and inherits the gated
+    env; not removed.
+22. ~~**Spawned children inherit the audit-log fd; bypass of
+    `writeJsonString`.**~~ **CLOSED 2026-05-19 (v1.3.6):** `O_CLOEXEC`
+    added to every `libc.open`/`libc.pipe` site:
+    `audit.zig::init`, `main.zig::load_init_janet`, and the
+    `cmd_agent_spawn` pipe (via `fcntl(F_SETFD, FD_CLOEXEC)`).
+    Pre-fix: a child of `agent/spawn` / `agent/run` / `os/shell`
+    could discover the inherited fd via `/proc/self/fd` and write
+    raw bytes to the JSONL log, forging events past the
+    `writeJsonString` escape. Post-fix: every fork+exec child sees
+    CLOEXEC fds; the audit channel is closed in the child before
+    exec.
+23. ~~**`list-buffers` print path bypassed `sanitize_into` —
+    round-1 #4 only half-closed.**~~ **CLOSED 2026-05-19 (v1.3.6):**
+    New `sanitizeNameInto` helper in `main.zig` canonicalizes buffer
+    names at the WRITE site — `MAST_NEWBUFFER_SENTINEL` and
+    `MAST_SAVEAS_SENTINEL` both pass user input through it before
+    storing in `Buffer.name`. Doctrine: sanitize at the trust
+    boundary, not scattered across render sites. v1.3.4 v1.3.4 added
+    `sanitize_into` only inside `tui.render_to_buf`; the line-REPL
+    `list-buffers` and `M-x display` paths printed buffer names
+    unsanitized. PoC was
+    `M-x new-buffer "$(printf 'a\x1b]52;c;...\x07')"` →
+    `M-x list-buffers` → OSC 52 clipboard hijack reached the
+    terminal. Post-fix: the malicious bytes are replaced with `?`
+    BEFORE they enter the Buffer name, so every consumer (TUI,
+    REPL, list-buffers) sees safe bytes.
+24. ~~**`audit.zig::write` had unbounded `buf[written] = X` writes
+    near the 4096 ceiling.**~~ **CLOSED 2026-05-19 (v1.3.6):** New
+    `appendByte(buf, &written, b)` bounded helper. Every bare
+    `buf[written] = X` site converted to `try appendByte(...)`,
+    which returns `error.NoSpaceLeft` on overflow. Pre-fix:
+    `writeJsonString` could return success at exactly
+    `out.len == 4096`, then the next `buf[4096] = '}'` was one
+    byte past the stack array (UB). PoC was `M-x save-as
+    <~4000-char path>`. Post-fix: long inputs surface as a
+    write-failed error rather than corrupting adjacent stack.
+25. **§7 manifest plan must declare source-scan unsound.** *Doctrine
+    update only — no code change in v1.3.6.* The §7 v2 capability-
+    manifest paragraph still implicitly assumes source-level review
+    is sound. Round 2 confirms this is wrong: with `compile` +
+    `parser/produce` + future `buffer-contents` cfunction, a script
+    can build code at runtime that never appears as a literal in
+    init.janet. The manifest MUST be a runtime grant against an
+    empty default-deny env; source scan is NEVER sufficient. v0.4
+    design.
+
 ---
 
 ## 7. Out of scope for v1
