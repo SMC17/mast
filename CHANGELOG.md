@@ -6,6 +6,64 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.3.9 — round-4 adversarial review: bugs in MY OWN fix code (2026-05-19)
+
+Round 4 of self-applied hostile review against post-v1.3.8 mast found
+**2 critical load-bearing bugs in the v1.3.4-v1.3.8 fix code itself**
+plus 2 minor items. The auto_suspend leak (#1) is the most important
+shipment of the day — pre-fix, ONE quota timeout broke every
+subsequent eval for the rest of the process.
+
+Round 4 report: `research/2026-05-19-adversarial-review-round4.md`.
+
+**Finding #1 — SIGALRM quota leaked `auto_suspend` (CRITICAL).**
+`janet_interpreter_interrupt(vm)` does `janet_atomic_inc(&vm->auto_suspend)`.
+The matching `janet_interpreter_interrupt_handled` (atomic decrement)
+was NEVER called by mast. After any timeout fired, `vm->auto_suspend`
+== 1 for the rest of the process; every subsequent bytecode op
+returned `JANET_SIGNAL_INTERRUPT` at the first opportunity.
+`tests/quota_integration.sh` missed it because the test piped ONE
+expression then EOFed.
+
+**Fix:** new `g_alarm_fires: c_int` atomic counter; `alarm_handler`
+increments via `@atomicRmw`; `janet_dostring_quota` atomically loads
++ drains the count after the eval returns, calling
+`janet_interpreter_interrupt_handled` once per fire. `auto_suspend`
+goes back to 0 between evals.
+
+**Regression test added:** `tests/quota_integration.sh` Case 4 sends
+`(while true 1)\n(+ 2 40)\nexit\n` in a single session and asserts
+the second eval returns `→ 42`. Pre-fix, the second eval would
+interrupt at the first bytecode op.
+
+**Finding #2 — wall-clock quota only bounded Janet bytecode, not
+blocking cfunctions.** `cmd_agent_wait`'s `libc.poll(..., 500ms)`
+returned EINTR on SIGALRM but the loop silently retried.
+`(agent/spawn "sleep 9999"); (agent/wait 0)` blocked for the full
+9999s regardless of `MAST_EVAL_TIMEOUT_SEC=30`.
+
+**Fix:** `cmd_agent_wait` snapshots `g_alarm_fires` at entry and
+checks it between poll iterations; if the handler bumped it during
+this call, the cfunction panics with "interrupted by quota."
+
+**Regression of round-2 #3.** `MAST_NEWBUFFER_SENTINEL` (line 963)
+and `MAST_SAVEAS_SENTINEL` (line 1079) printed `parsed.args[0]`
+raw via `print(... {s} ...)` — same OSC 52 clipboard-hijack vector
+through a different stdout sink. v1.3.6's `sanitizeNameInto`
+sanitized the Buffer.name canonicalize path but the immediate-feedback
+echo was missed. **Fixed:** both echo lines now use the sanitized
+buffer instead of raw `parsed.args[0]`.
+
+**Sanitizer doctrine convergence.** `agent/spawn`'s name_buf loop
+used `>= 0x20 and < 0x7f` (strips UTF-8 entirely); `sanitizeNameInto`
+keeps high-bit. **Fixed:** `agent/spawn` now uses the same case-by-
+case switch as `sanitizeNameInto` (preserves UTF-8, strips only
+control bytes).
+
+**Tests:** 49/49 in-source + 6/6 quota integration (was 5/5, +1 for
+the round-4 regression test) + 25/25 doctest + 5/5 strict-mode
+integration + sandbox-fuzz clean.
+
 ### v1.3.8 — init.janet truncation warning + selective os/* closures (2026-05-19)
 
 Two of the round-2 honest-residuals named in v1.3.6 are now closed.
