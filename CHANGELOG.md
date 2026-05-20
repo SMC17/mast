@@ -6,6 +6,47 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.3.5 — resource quota via SIGALRM + janet_interpreter_interrupt (2026-05-19)
+
+Closes the long-standing v1.3.0 §honest-residuals "no resource quotas"
+item. The primitive was identified in v1.3.3
+(`janet_interpreter_interrupt` + `janet_local_vm` in
+`vendored/janet/janet.h` lines 2066–2072); v1.3.5 wires it up.
+
+**How it works:**
+
+1. `alarm_handler` runs in signal context when SIGALRM fires. It calls
+   `janet_interpreter_interrupt(janet_local_vm())`, which tells the
+   Janet VM to cancel the currently-running fiber at the next
+   bytecode-op boundary.
+2. `janet_dostring_quota` wraps every `janet_dostring` call in the
+   REPL + `cmd_agent_run` + `load_init_janet` paths: `libc.alarm(N)`
+   before, `libc.alarm(0)` after.
+3. The cancelled fiber returns non-zero status to `janet_dostring`,
+   surfaced as a normal `mx-error` audit event. mast does NOT die —
+   the editor recovers cleanly.
+
+**Configurable** via `MAST_EVAL_TIMEOUT_SEC` env var (default 30s,
+cap 3600s).
+
+**Smoke test confirmation:**
+
+```
+$ printf '(while true 1)' | MAST_EVAL_TIMEOUT_SEC=3 ./zig-out/bin/mast
+M-x interrupted:
+  in thunk [mx] on line 1, column 1
+  (error: status=1)
+M-x
+```
+
+A `(while true 1)` infinite loop is cleanly interrupted after 3
+seconds; mast presents the next prompt. Pre-v1.3.5 this would freeze
+mast until the user hit Ctrl-C externally.
+
+**What this means for the threat model:** §6 #8 "no resource quotas"
+flips from open to CLOSED. The primitive is exercised in production
+paths, not just documented.
+
 ### v1.3.4 — adversarial-review-driven security closures (2026-05-19)
 
 A self-applied hostile-reviewer pass against the post-v1.3.3 threat
