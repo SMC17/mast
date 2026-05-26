@@ -1,6 +1,14 @@
-# mast status
+---
+last_touched: 2026-05-22
+prior_touch: 2026-05-19
+current_test_count: 49
+proof_level: audited
+posture: pre-1.0-in-semver-spirit
+upstream_zig_version: "0.16"
+audit_history_ref: ~/agent-fleet/audit/verdicts/INDEX.md
+---
 
-Last touched: 2026-05-19
+# mast status
 
 ## Honest version posture
 
@@ -51,6 +59,7 @@ substrate until both gates above close.
 | README/code drift                        | `unit-tested`                                     | `tools/doctest.sh` 25/25 PASS against the shipped binary, including the 5/5 `MAST_SANDBOX_STRICT` integration cases it delegates to, the multi-buffer lifecycle, agent/run + agent/spawn cycles, --tui launch, and G2 panic observability |
 | Mutation surface                         | `audited`                                         | `tools/mutation-test.sh` 8/10 killed; 2 survivors classified honestly as equivalent mutants (M08 fd-zero, M10 mark-clamp no-op); no new survivors emerged from the v1.3.x sandbox extensions |
 | Cross-platform build                     | `compiled` (CI only)                              | CI matrix on Linux x86_64 + macOS arm64 with Zig 0.16.0                                                                                                        |
+| Fleet G1 target invocation               | `scaffold`                                       | `tools/fleet-preflight` invokes `~/agent-fleet/fleet-smoke --repo ~/mast --mode local`; local smoke passes with 9/9 root stubs emitting `not-implemented` scaffold verdicts. This is not real PR blocking and not real fleet review. |
 
 ## Gates that would justify a stronger claim
 

@@ -6,6 +6,24 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Test-count drift catch — 2026-05-22
+
+`~/agent-fleet/spec/drift-check` (the SpecFleet automated C5 enforcement tool) surfaced a Type-I under-claim drift on day-zero deployment:
+
+- **README.md** said "20/20 tests as of 2026-05-19".
+- **CHANGELOG.md** carried "20/20 tests pass" in the 2026-05-19 release notes (preserved as historical record).
+- **Actual** per `zig build test --summary all` on 2026-05-22: **49/49 tests passed** (Build Summary: 16/16 steps succeeded; 49/49 tests passed).
+
+**Drift: +29 tests (+145%).** Substrate grew through the v1.3.x adversarial-review rounds (sandbox property tests, JSON injection PoC neutralization, TUI ANSI sanitization, audit-log boundary, fuzz harness, etc.) but the README's cross-system summary didn't keep up.
+
+Same pattern carreir caught at smaller scale (41 → 53, +29%) and edge-ledger caught at larger scale (38 → 108, +184%; updated 2026-05-22 to 121 → +218% original drift). Under-claim drift IS Type-I per `~/agent-fleet/audit/calibration/CORPUS_PART_5.md` #156.
+
+**Fix this commit:**
+
+- README.md line 74 updated to "49/49 tests as of 2026-05-22".
+- Historical CHANGELOG entries citing "20/20" or smaller counts are preserved as accurate historical records (they document the substrate state at the date of the release entry).
+- Drift-check now wired into CI (this release; see `.github/workflows/ci.yml` test-count-drift job).
+
 ### v1.4.0 — shell-cfunction quota propagation (closes round-5 residual #30) (2026-05-20)
 
 The only remaining named mast residual from rounds 1–5 of adversarial

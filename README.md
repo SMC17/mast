@@ -71,7 +71,7 @@ ones are closed.
 ```
 zig build                       # debug build to ./zig-out/bin/mast
 zig build -Doptimize=ReleaseSmall
-zig build test --summary all    # 20/20 tests as of 2026-05-19
+zig build test --summary all    # 49/49 tests as of 2026-05-22
 ```
 
 Linux x86_64 + macOS arm64 are the supported targets. The build embeds
