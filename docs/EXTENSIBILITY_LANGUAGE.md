@@ -21,7 +21,7 @@ The four hard constraints from `SPEC.md`:
 Two soft constraints from doctrine:
 
 - License-clean against AGPL host (no copyleft drag from a GPL extension language onto AGPL host code; permissive is preferred).
-- Mature enough to bet a v0.1 ship on (no alpha projects in the kernel).
+- Established enough to bet a v0.1 ship on (no alpha projects in the kernel).
 
 ---
 
@@ -31,7 +31,7 @@ Two soft constraints from doctrine:
 |---|---|---|---|---|---|---|
 | **Janet** | MIT | high (since 2017) | ~1 MB binary | C API, single header | native (no JIT) | high (Scheme-influenced) |
 | **Fennel** | MIT | high (since 2016) | 300 KB Fennel + Lua (~500–800 KB total) | Lua C API (indirection) | native via PUC Lua; LuaJIT weak on arm64 | medium (Clojure-style) |
-| **Guile** | GPL | highest (since 1995) | ~25–30 MB shared lib | `libguile` C API | mature | highest (R5RS + most R6RS) |
+| **Guile** | GPL | highest (since 1995) | ~25–30 MB shared lib | `libguile` C API | established | highest (R5RS + most R6RS) |
 | **Element 0 (Elz)** | Apache-2.0 | alpha (v0.1.0-alpha.5, Dec 2025) | small (Zig-native) | `@import("elz")` | native (Zig) | high (R5RS-ish, growing) |
 
 (Sources: each project's public docs page as of 2026-05-13. Janet at version 1.41.2; Fennel at 1.6.1; Guile at 3.0.11; Element 0 at v0.1.0-alpha.5.)
@@ -88,8 +88,8 @@ Eight criteria, weighted by load-bearing impact on the substrate's strategic pos
 | License clean vs AGPL host (high) | **MIT — best** | MIT — best | LGPL — drag risk | Apache-2.0 — best |
 | ≤10 MB binary (high) | **~1 MB ✓** | ~800 KB ✓ | 25–30 MB ✗ | small ✓ |
 | Zig embeddability (high) | C API via `@cImport` — clean | Lua C API — indirection | libguile.so — heavy | **native `@import`** |
-| Apple Silicon perf (high) | **native, no JIT needed** | PUC Lua ok; LuaJIT weak | mature | native |
-| Maturity (high) | **2017, active** | **2016, active** | **1995, most mature** | alpha, 2025 |
+| Apple Silicon perf (high) | **native, no JIT needed** | PUC Lua ok; LuaJIT weak | established | native |
+| Maturity (high) | **2017, active** | **2016, active** | **1995, most established** | alpha, 2025 |
 | Lisp lineage fidelity (medium) | high | medium | **highest** | high (growing) |
 | Extension ecosystem reach (medium) | small but active | **large (Lua)** | large (Scheme + GNU) | tiny (early) |
 | Foundation-first risk (high) | **low** | low | medium (size) | **high (alpha)** |
@@ -108,7 +108,7 @@ The decision is gated on one verification step before commit zero: a build test 
 
 **Decline: Guile.** Size + license drag are structural disqualifiers for v0.1. Revisit only if the substrate's strategic geometry changes (it won't).
 
-**Defer: Element 0.** Watch for v0.3+ maturity (target observation 2027-Q3). If Element 0 reaches production-grade maturity with multiple contributors and a stable API, a substrate v2.0 port becomes a credible bet. Until then, foundation-first forbids it.
+**Defer: Element 0.** Watch for v0.3+ adoption and API evidence (target observation 2027-Q3). If Element 0 reaches sustained multi-contributor use with a documented compatibility policy, a substrate v2.0 port becomes a credible bet. Until then, foundation-first forbids it.
 
 ---
 

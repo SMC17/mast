@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Run the local agent-fleet G1 stub-shape smoke against this repo.
+#
+# This is local enforcement-spine wiring. It proves the target repo can invoke
+# the fleet dispatcher contract; it does not run real fleet implementations.
+
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+agent_fleet="${AGENT_FLEET_DIR:-/home/user/agent-fleet}"
+
+if [[ ! -x "$agent_fleet/fleet-smoke" ]]; then
+  echo "fleet-preflight: missing executable $agent_fleet/fleet-smoke" >&2
+  exit 3
+fi
+
+exec "$agent_fleet/fleet-smoke" --repo "$repo" --mode local "$@"
