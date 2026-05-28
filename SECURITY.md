@@ -31,18 +31,18 @@ mast is in active early development. We support the latest tagged release on the
 
 ## Adversarial review trail
 
-As of 2026-05-19 the sandbox model has been audited via **four rounds of self-applied hostile-reviewer review + one fuzz harness**. The full trail ships in the repository:
+As of 2026-05-19 the sandbox model has been audited via **four rounds of self-applied hostile-reviewer review + one fuzz harness**. Summary:
 
-| Round | Findings | Closure release | Report |
-|-------|---------:|----------------:|--------|
-| 1 — manual hostile-reviewer | 7 (fs bypass, FFI live, JSON injection, ANSI injection, process control, bytecode, agent/wait DoS) | v1.3.4 | `research/2026-05-19-adversarial-review.md` |
-| 2 — manual, post-round-1 | 4 + doctrine (ev/thread VM bypass, O_CLOEXEC leak, list-buffers sanitize gap, audit buffer overflow) | v1.3.6 | `research/2026-05-19-adversarial-review-round2.md` |
-| 3 — runtime fuzz enumeration | 2 (ffi/calling-conventions, ffi/trampoline missed in round-2 source-reading) | v1.3.7 | `tools/sandbox-fuzz.{janet,sh}` |
-| 4 — audit of MY OWN fix code | 2 critical (SIGALRM auto_suspend leak, wall-clock quota didn't bound blocking cfunctions) + 1 regression + 1 doctrine | v1.3.9 | `research/2026-05-19-adversarial-review-round4.md` |
+| Round | Findings | Closure release |
+|-------|---------:|----------------:|
+| 1 — manual hostile-reviewer | 7 (fs bypass, FFI live, JSON injection, ANSI injection, process control, bytecode, agent/wait DoS) | v1.3.4 |
+| 2 — manual, post-round-1 | 4 + doctrine (ev/thread VM bypass, O_CLOEXEC leak, list-buffers sanitize gap, audit buffer overflow) | v1.3.6 |
+| 3 — runtime fuzz enumeration | 2 (ffi/calling-conventions, ffi/trampoline missed in round-2 source-reading) | v1.3.7 (`tools/sandbox-fuzz.{janet,sh}`) |
+| 4 — audit of MY OWN fix code | 2 critical (SIGALRM auto_suspend leak, wall-clock quota didn't bound blocking cfunctions) + 1 regression + 1 doctrine | v1.3.9 |
 
-The persona for each round is "self-applied hostile-reviewer," per the `feedback_no_fake_credentialing` doctrine. None of these is a substitute for **external** independent security review, which remains [STATUS.md](STATUS.md) gate G4 (still open).
+The persona for each round is "self-applied hostile-reviewer". None of these is a substitute for **external** independent security review, which remains [STATUS.md](STATUS.md) gate G4 (still open).
 
-If you're considering an independent review, the round 4 report is the best starting point — it audits the fix code from rounds 1–3 and found real bugs there. Continuing that pattern is the highest-leverage next move.
+Round 4 — auditing the fix code from rounds 1–3 — is the pattern worth continuing.
 
 ## Sandbox-model design constraints (informative)
 

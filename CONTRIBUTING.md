@@ -14,7 +14,7 @@ Thanks for considering a contribution. mast is intentionally small at v0.1 — t
 
 - Refactors that don't change observable behavior. The codebase is small enough that style preferences are decided by the existing code.
 - Plugin-marketplace proposals. Extensibility ships through Janet, not a centralized registry. This is a v0.1 commitment, not a TODO.
-- Replacing Janet with another extensibility language. The decision memo at `docs/EXTENSIBILITY_LANGUAGE.md` documents why Janet won; arguments for replacement need to engage with that memo's criteria.
+- Replacing Janet with another extensibility language. The decision is locked for v0.1; arguments for replacement need to engage with the criteria (single-binary embed, REPL eval, buffer-first scripting, AGPL-clean license).
 
 ## Process
 

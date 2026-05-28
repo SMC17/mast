@@ -8,15 +8,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Test-count drift catch — 2026-05-22
 
-`~/agent-fleet/spec/drift-check` (the SpecFleet automated C5 enforcement tool) surfaced a Type-I under-claim drift on day-zero deployment:
+A drift-check pass surfaced a Type-I under-claim:
 
 - **README.md** said "20/20 tests as of 2026-05-19".
 - **CHANGELOG.md** carried "20/20 tests pass" in the 2026-05-19 release notes (preserved as historical record).
 - **Actual** per `zig build test --summary all` on 2026-05-22: **49/49 tests passed** (Build Summary: 16/16 steps succeeded; 49/49 tests passed).
 
-**Drift: +29 tests (+145%).** Substrate grew through the v1.3.x adversarial-review rounds (sandbox property tests, JSON injection PoC neutralization, TUI ANSI sanitization, audit-log boundary, fuzz harness, etc.) but the README's cross-system summary didn't keep up.
-
-Same pattern carreir caught at smaller scale (41 → 53, +29%) and edge-ledger caught at larger scale (38 → 108, +184%; updated 2026-05-22 to 121 → +218% original drift). Under-claim drift IS Type-I per `~/agent-fleet/audit/calibration/CORPUS_PART_5.md` #156.
+**Drift: +29 tests (+145%).** Substrate grew through the v1.3.x adversarial-review rounds (sandbox property tests, JSON injection PoC neutralization, TUI ANSI sanitization, audit-log boundary, fuzz harness, etc.) but the README's cross-system summary didn't keep up. Under-claim drift counts as Type-I.
 
 **Fix this commit:**
 
@@ -67,10 +65,9 @@ API-additive: new `sandbox.g_shell_runner` public hook; no removals.
 
 ### v1.3.10 — round-5 adversarial review: production-robustness closures (2026-05-19)
 
-Round 5 (`research/2026-05-19-adversarial-review-round5.md`) explicitly
-noted: **"rounds 1-4 + fuzz exhausted the privilege-escalation
-surface; round 5's findings are production-robustness, NOT 'no-escape'
-claims."** Net-new escalation paths: **zero**. v1.3.10 closes 4 of
+Round 5 explicitly noted: **"rounds 1-4 + fuzz exhausted the
+privilege-escalation surface; round 5's findings are production-
+robustness, NOT 'no-escape' claims."** Net-new escalation paths: **zero**. v1.3.10 closes 4 of
 round 5's 5 findings; #30 is named as honest residual with v1.4
 implementation path.
 
@@ -119,8 +116,6 @@ Round 4 of self-applied hostile review against post-v1.3.8 mast found
 plus 2 minor items. The auto_suspend leak (#1) is the most important
 shipment of the day — pre-fix, ONE quota timeout broke every
 subsequent eval for the rest of the process.
-
-Round 4 report: `research/2026-05-19-adversarial-review-round4.md`.
 
 **Finding #1 — SIGALRM quota leaked `auto_suspend` (CRITICAL).**
 `janet_interpreter_interrupt(vm)` does `janet_atomic_inc(&vm->auto_suspend)`.
@@ -339,9 +334,8 @@ paths, not just documented.
 ### v1.3.4 — adversarial-review-driven security closures (2026-05-19)
 
 A self-applied hostile-reviewer pass against the post-v1.3.3 threat
-model found seven net-new gaps the prior audit missed. Report:
-`research/2026-05-19-adversarial-review.md`. All seven are addressed
-in this release (six closed mechanically, one documented as
+model found seven net-new gaps the prior audit missed. All seven are
+addressed in this release (six closed mechanically, one documented as
 intentional residual).
 
 **Finding #1 — `os/open` + `file/*` methods bypassed the v0.2 file-I/O
@@ -800,7 +794,7 @@ Commit-zero. Foundation-first gates 1–3 green on Linux x86_64 and Apple Silico
 - Four built-in M-x commands shipped: `pid`, `help`, `stax-search`, `stax-dashboard`, `stax-hunger` (the last three shell out to the local stax-* CLIs when available).
 - Cross-platform build (Linux x86_64, Apple Silicon arm64). Build artifacts: ~950 KB on Linux, ~962 KB on Mach-O arm64.
 - AGPL-3.0-or-later license. Vendored Janet keeps its MIT license inline at `vendored/janet/LICENSE`.
-- Companion docs: SPEC.md (architecture), EXTENSIBILITY_LANGUAGE.md (Janet decision memo), buffer-protocol.md (Janet ↔ Zig binding), STRATEGIC_POSITION.md (positioning vs Emacs / VS Code / Cursor).
+- Companion docs: SPEC.md (architecture), buffer-protocol.md (Janet ↔ Zig binding).
 
 ### Not in v0.1
 

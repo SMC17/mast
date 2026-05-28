@@ -1,9 +1,8 @@
 # Buffer-Protocol Binding (Janet ↔ Zig host)
 
 **Date:** 2026-05-13
-**Status:** sketch. Becomes `compiled` after the §5 build test in `EXTENSIBILITY_LANGUAGE.md` lands.
-**Parents:** `SPEC.md` §3.1 (buffer-as-protocol primitive), `EXTENSIBILITY_LANGUAGE.md` §5(2) (foundation-first verification gate #2).
-**Companions:** `STRATEGIC_POSITION.md`, `feedback_foundation_first.md`, `feedback_robust_over_parlor_tricks.md`.
+**Status:** sketch. Becomes `compiled` once the Janet build test lands.
+**Parents:** `SPEC.md` §3.1 (buffer-as-protocol primitive).
 
 The buffer protocol is the API contract between Janet user code and the Zig editor kernel. Every observable editor object (file, conversation, heartbeat tail, search result, manifest event stream) appears in Janet as a table conforming to this protocol. There is no second access path.
 
@@ -137,13 +136,13 @@ No raw pointer is ever held by Janet code. Janet never knows the buffer's flat-v
 
 ## 8. Verification (gates promotion from `sketch` to `compiled`)
 
-1. Janet build test (`EXTENSIBILITY_LANGUAGE.md` §5 step 1) confirms `@cImport(janet.h)` works.
+1. Janet build test confirms `@cImport(janet.h)` works.
 2. A minimal Zig program registers `:read` + `:write` + `:point` cfns against a 32-byte in-memory buffer and demonstrates the worked example from §5 round-tripping a string mutation.
-3. A unit test under `~/mac-mining/editor-substrate/build-tests/buffer-protocol-smoke/` confirms:
+3. A unit test under `build-tests/buffer-protocol-smoke/` confirms:
    - Reading past `:size` panics with `[:out-of-range :read ...]`.
    - Writing invalid UTF-8 panics with `[:invalid-utf8 ...]`.
    - Subscribing, mutating, then unsubscribing delivers exactly one `:change` event in order.
-4. The smoke test runs cleanly on Apple Silicon and on Linux (per `project_three_os_mesh.md`).
+4. The smoke test runs cleanly on Apple Silicon and on Linux.
 
 When all four land, this document's proof level moves from `sketch` to `compiled`, and the buffer protocol is no longer a load-bearing assumption — it is a verified contract.
 

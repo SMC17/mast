@@ -195,10 +195,10 @@ A mast is the load-bearing spar everything hangs off — sails, rigging, cargo n
 
 ## Architecture
 
-See `docs/SPEC.md` for the full architectural sketch and `docs/STRATEGIC_POSITION.md` for the positioning vs Emacs / VS Code / Cursor. Highlights:
+See `docs/SPEC.md` for the architectural sketch. Highlights:
 
 - **Buffer-as-protocol.** Every observable object exposes `read`, `write`, `subscribe`, `mark`, `mode`, `properties`. There is no second access path.
-- **Extensibility through Janet.** Janet was chosen because it embeds cleanly in a single Zig binary, supports interactive REPL evaluation against the live editor process, and exposes the buffer surface as a first-class scripting target. See `docs/EXTENSIBILITY_LANGUAGE.md` for the decision memo.
+- **Extensibility through Janet.** Janet was chosen because it embeds cleanly in a single Zig binary, supports interactive REPL evaluation against the live editor process, and exposes the buffer surface as a first-class scripting target.
 - **Agent integration through CLIs, not network sockets.** Editor commands that invoke an agent route through locally-installed CLIs (`stax-spawn`, `stax-search`, etc.) — never directly to a frontier API. This is an architectural commitment, not a configuration option.
 - **Append-only audit log.** Every editor session writes to `~/.local/state/stax/editor-sessions/<session-id>.jsonl`. The substrate cannot lie to its future self about what it did.
 
@@ -230,7 +230,7 @@ capability model alone.
 
 AGPL-3.0-or-later. See `LICENSE`.
 
-The license is the architecture, not the legal afterthought. AGPL from commit zero so the substrate is *absorbable* by larger players without being closed-forkable by them. Dual-licensing is not on the table for v1.0.
+The license is the architecture, not the legal afterthought. AGPL from commit zero so the substrate stays partner-integratable without being closed-forkable. Dual-licensing is not on the table for v1.0.
 
 The vendored Janet runtime stays under its original MIT license at `vendored/janet/LICENSE`.
 
