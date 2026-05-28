@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "mast: Single-binary editor kernel — buffer-as-protocol, Janet-extensible"
+abstract: "Editor kernel where every observable object (buffers, modes, prompts, audit events) is reachable through one scriptable protocol. Zig host + Janet runtime. AGPL-3.0."
+authors:
+  - family-names: Collins
+    given-names: Sean
+    email: sean@sunlitmoon.online
+    affiliation: independent
+url: "https://github.com/SMC17/mast"
+repository-code: "https://github.com/SMC17/mast"
+version: "1.4.0"
+license: AGPL-3.0-or-later
+keywords:
+  - zig
+  - editor
+  - janet
+  - text-editor
+  - tui
