@@ -387,8 +387,8 @@ than hide them. **Items #1–5 of the prior version are CLOSED by G2
     share the same capability set. v2 keys the set off the `JanetTable*`.
 
 **v1.3.4 (2026-05-19) — adversarial-review-driven additions.** A
-self-applied hostile-reviewer pass (`research/2026-05-19-adversarial-review.md`)
-identified seven net-new gaps the prior threat model missed. Findings
+self-applied hostile-reviewer pass identified seven net-new gaps the
+prior threat model missed. Findings
 14–20 below: six are CLOSED in v1.3.4, one (#19) is documented
 intentional residual.
 
@@ -442,8 +442,8 @@ intentional residual.
     matching the capability that created the handle.
 
 **v1.3.6 (2026-05-19) — round-2 adversarial review.** A second
-self-applied hostile-reviewer pass (`research/2026-05-19-adversarial-review-round2.md`)
-found four more net-new gaps. All closed in v1.3.6.
+self-applied hostile-reviewer pass found four more net-new gaps. All
+closed in v1.3.6.
 
 21. ~~**`ev/thread` re-instantiates a fresh Janet VM with the full
     stdlib.**~~ **CLOSED 2026-05-19 (v1.3.6):** `ev/thread`,
@@ -502,8 +502,7 @@ found four more net-new gaps. All closed in v1.3.6.
     design.
 
 **v1.3.9 (2026-05-19) — round-4 adversarial review of the fix code.**
-Round 4 (`research/2026-05-19-adversarial-review-round4.md`) audited
-the v1.3.4–v1.3.8 fix code itself. Found 2 critical bugs in MY OWN
+Round 4 audited the v1.3.4–v1.3.8 fix code itself. Found 2 critical bugs in MY OWN
 implementations + 1 regression of round-2 #3. All closed.
 
 26. ~~**SIGALRM quota leaked `auto_suspend`** — one timeout
@@ -533,9 +532,9 @@ implementations + 1 regression of round-2 #3. All closed.
     that preserves UTF-8, strips only control bytes).
 
 **v1.3.10 (2026-05-19) — round-5 adversarial review.** Round 5
-(`research/2026-05-19-adversarial-review-round5.md`) explicitly noted
-"rounds 1-4 + fuzz exhausted the privilege-escalation surface; round
-5's findings are production-robustness, NOT 'no-escape' claims."
+explicitly noted "rounds 1-4 + fuzz exhausted the privilege-escalation
+surface; round 5's findings are production-robustness, NOT 'no-escape'
+claims."
 Net-new escalation paths: **zero**. v1.3.10 closes 4 of round 5's 5
 findings; #30 (shell-cfunction quota propagation) is named as an
 honest residual with v1.4 implementation path.

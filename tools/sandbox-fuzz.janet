@@ -15,7 +15,7 @@
 #   RETURNED <sym> = <result> — cfunction returned without panic;
 #                                flag if symbol looks dangerous
 #
-# Closes round-2 adversarial-review-round2.md's "Round 3" prescription.
+# Closes the round-2 prescription for a runtime fuzz enumeration of the binding-gate.
 
 (defn sandbox-fuzz
   []

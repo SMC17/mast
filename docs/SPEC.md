@@ -1,9 +1,6 @@
 # Editor Substrate — Architecture Sketch
 
-**Working name:** TBD. Working directory: `~/mac-mining/editor-substrate/`. Internal handle: "the substrate" until a Lineage-compatible name lands.
-**Doctrine anchors:** `feedback_cli_first_mcp_dead.md` (Zig CLIs as substrate, Elixir/BEAM orchestration), `feedback_no_paid_api_keys.md` (subscription-CLI auth + open weights), `project_three_os_mesh.md` (per-node mechanical sympathy), `project_sovereign_hardware_aether.md` (anti-cloud, supplier-independent intelligence), `feedback_foundation_first.md` (bottom-up; no upper layer before its substrate is solid), `feedback_no_sovereign_coinage.md` (no new sovereign-X names).
-**Companion essay:** `~/blog/content/posts/apple-next-pixar-emacs.md` (DRAFT). The essay states the thesis. This file is the engineering substrate the essay depends on.
-**Status:** scoping sketch, 2026-05-13. First-ship target Q3 2026 per the essay's Bet 1.
+**Status:** scoping sketch, 2026-05-13. First-ship target Q3 2026.
 
 ---
 
@@ -58,7 +55,7 @@ Decision deadline: Q2 2026, before the v0.1 commit. The choice gates the entire 
 
 ### 3.3 Agent integration
 
-Editor commands that invoke an agent route through `stax-spawn` (for new agents) or `stax-manifest active` + `tmux send-keys` (for existing live lanes). The editor never opens a network connection to a frontier API directly; all auth flows through the locally-installed CLI's subscription auth or local OSS model. This is `feedback_no_paid_api_keys.md` enforced at the architecture level.
+Editor commands that invoke an agent route through `stax-spawn` (for new agents) or `stax-manifest active` + `tmux send-keys` (for existing live lanes). The editor never opens a network connection to a frontier API directly; all auth flows through the locally-installed CLI's subscription auth or local OSS model. This is an architecture-level commitment, not a configuration option.
 
 The editor presents three default agent surfaces:
 
@@ -89,9 +86,9 @@ This is the audit-discipline doctrine (`feedback_audit_for_type1_type2.md`, `fee
 
 ## 5. License posture
 
-AGPL-3.0-or-later from commit zero. The license is the architecture, not the legal afterthought. The Mercantile Thesis essay names license posture as one of the eight axes; this substrate puts it on the AGPL side deliberately so the substrate is absorbable by Apple or xAI without being closed-forkable by them.
+AGPL-3.0-or-later from commit zero. The license is the architecture, not the legal afterthought. The substrate stays partner-integratable without being closed-forkable.
 
-Dual-licensing under a commercial-friendly OSI license is *not* on the table for v1.0. Revisit when the bidding-war thesis is actually tested (post Bet 3 in the companion essay).
+Dual-licensing under a commercial-friendly OSI license is *not* on the table for v1.0.
 
 ## 6. First-ship deliverable (v0.1, target Q3 2026)
 
@@ -103,7 +100,7 @@ Dual-licensing under a commercial-friendly OSI license is *not* on the table for
 | 2. Buffer-protocol binding sketch | `buffer-protocol.md` | ✓ 14 KB doc; per-key contract + 4 canonical buffer kinds | ✓ same doc (platform-independent) |
 | 3. M-x command-runner demo | `build-tests/mx-runner-demo/zig-out/bin/mx-runner-demo` | ✓ 954 KB; pid + help + dispatch table + REPL working | ✓ Mach-O arm64; pid + help + dispatch working |
 
-The v0.1 commit-zero is now unblocked. The remaining gates before public-OSS-repo creation are operator-side decisions: (a) repo name, (b) AGPL license-file commit, (c) the no-public-pushes-yet doctrine green-light per `feedback_no_public_pushes_yet.md`.
+The v0.1 commit-zero is now unblocked. The remaining gates before public-OSS-repo creation are operator-side decisions: (a) repo name, (b) AGPL license-file commit, (c) green-light to push.
 
 A single Zig binary, ≤10 MB, that:
 
@@ -133,7 +130,5 @@ Active scoping. No commits yet. First commit gated on:
 1. Extensibility-language choice (decision by 2026-06-30).
 2. Buffer-protocol binding spec (draft by 2026-07-15).
 3. First-ship deliverable §6 above scoped into milestones small enough to ship weekly.
-
-The companion blog essay is in draft (`~/blog/content/posts/apple-next-pixar-emacs.md`). The strategic memo is in draft (`~/mac-mining/editor-substrate/STRATEGIC_POSITION.md`).
 
 No public push until the v0.1 commit lands.
