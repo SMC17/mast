@@ -153,6 +153,53 @@ pub const Buffer = struct {
         self.dirty = true;
     }
 
+    /// Find the first byte offset where `pattern` starts in the buffer,
+    /// or `null` if not present. Empty pattern returns `0` by convention
+    /// (matches `std.mem.indexOf` + `strstr(3)` semantics: the empty
+    /// string is a prefix of every position, and 0 is the leftmost).
+    /// On an empty buffer with non-empty pattern returns `null`.
+    pub fn findFirst(self: *const Buffer, pattern: []const u8) ?usize {
+        if (pattern.len == 0) return 0;
+        return std.mem.indexOf(u8, self.contents, pattern);
+    }
+
+    /// Find the first byte offset where `pattern` starts at or after
+    /// `start`, or `null` if not present. Empty pattern returns
+    /// `min(start, contents.len)` (same anchor-at-cursor semantics as
+    /// `findFirst` lifted by `start`). `start > contents.len` is clamped
+    /// to `contents.len` rather than rejected — search past EOF is a
+    /// natural miss, not a usage bug.
+    pub fn findFrom(self: *const Buffer, pattern: []const u8, start: usize) ?usize {
+        const clamped = @min(start, self.contents.len);
+        if (pattern.len == 0) return clamped;
+        if (clamped >= self.contents.len) return null;
+        const off_in_tail = std.mem.indexOf(u8, self.contents[clamped..], pattern) orelse return null;
+        return clamped + off_in_tail;
+    }
+
+    /// Replace the first occurrence of `pattern` with `replacement` by
+    /// composing `findFirst` + `deleteRange` + `insertAt`. Returns
+    /// `true` if a replacement was made, `false` if the pattern was not
+    /// found. An empty `pattern` returns `error.EmptyPattern` — the
+    /// degenerate "match every position" interpretation would either
+    /// loop forever (replace-all) or no-op (replace-first inserts at 0
+    /// then matches the just-inserted text), neither of which is what
+    /// the caller meant. Force the caller to disambiguate.
+    ///
+    /// Empty `replacement` is the natural "delete first occurrence"
+    /// composition and is fully supported.
+    pub fn replaceFirst(self: *Buffer, pattern: []const u8, replacement: []const u8) !bool {
+        if (pattern.len == 0) return error.EmptyPattern;
+        const at = self.findFirst(pattern) orelse return false;
+        // Composition order is load-bearing: deleteRange first, then
+        // insertAt at the same offset. If we insertAt first, the
+        // pattern's start offset still points into the old text but the
+        // subsequent deleteRange would target shifted bytes.
+        try self.deleteRange(at, at + pattern.len);
+        try self.insertAt(at, replacement);
+        return true;
+    }
+
     /// Write the buffer to disk. For `:file` kind, writes to its `name`
     /// path. For other kinds, the caller MUST supply a path via `saveAs`.
     /// Returns the number of bytes written.
@@ -814,6 +861,190 @@ test "property: 2000-trial mixed-op sequence matches model implementation" {
             // Dirty flag tracks model.
             if (expected_dirty) try std.testing.expect(b.dirty);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// findFirst / findFrom / replaceFirst — search + replace primitive.
+// These close the v1.5 gap: insertAt + deleteRange give random-access
+// editing but the script can't ask "where is this pattern?" without
+// reaching into Buffer.contents directly. replaceFirst composes the two
+// write primitives so the script layer never has to.
+// ---------------------------------------------------------------------------
+
+test "findFirst: empty buffer returns null for non-empty pattern" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "");
+    defer b.deinit();
+    try std.testing.expectEqual(@as(?usize, null), b.findFirst("abc"));
+}
+
+test "findFirst: empty buffer + empty pattern returns 0 (anchor convention)" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "");
+    defer b.deinit();
+    try std.testing.expectEqual(@as(?usize, 0), b.findFirst(""));
+}
+
+test "findFirst: hit at start, middle, end-of-buffer" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcXYZpqr");
+    defer b.deinit();
+    try std.testing.expectEqual(@as(?usize, 0), b.findFirst("abc"));
+    try std.testing.expectEqual(@as(?usize, 3), b.findFirst("XYZ"));
+    // Tail-anchored hit (last byte): "r" only occurs at index 8.
+    try std.testing.expectEqual(@as(?usize, 8), b.findFirst("r"));
+}
+
+test "findFirst: miss returns null" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcdef");
+    defer b.deinit();
+    try std.testing.expectEqual(@as(?usize, null), b.findFirst("XYZ"));
+}
+
+test "findFirst: empty pattern on non-empty buffer returns 0" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcdef");
+    defer b.deinit();
+    try std.testing.expectEqual(@as(?usize, 0), b.findFirst(""));
+}
+
+test "findFrom: skips past the first hit" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcXYZabcXYZ");
+    defer b.deinit();
+    // First "abc" is at 0; starting from 1 we should find the second at 6.
+    try std.testing.expectEqual(@as(?usize, 6), b.findFrom("abc", 1));
+    // Starting exactly at the second hit returns it.
+    try std.testing.expectEqual(@as(?usize, 6), b.findFrom("abc", 6));
+    // Starting past the second hit returns null (no third occurrence).
+    try std.testing.expectEqual(@as(?usize, null), b.findFrom("abc", 7));
+}
+
+test "findFrom: start at hit position returns that hit" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "hello world");
+    defer b.deinit();
+    try std.testing.expectEqual(@as(?usize, 6), b.findFrom("world", 6));
+}
+
+test "findFrom: start past end returns null for non-empty pattern" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abc");
+    defer b.deinit();
+    try std.testing.expectEqual(@as(?usize, null), b.findFrom("a", 99));
+}
+
+test "findFrom: empty pattern returns clamped start" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abc");
+    defer b.deinit();
+    try std.testing.expectEqual(@as(?usize, 2), b.findFrom("", 2));
+    try std.testing.expectEqual(@as(?usize, 3), b.findFrom("", 99)); // clamped
+}
+
+test "replaceFirst: no-op when pattern missing (returns false, not dirty)" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcdef");
+    defer b.deinit();
+    try std.testing.expect(!b.dirty);
+    const did = try b.replaceFirst("XYZ", "Q");
+    try std.testing.expect(!did);
+    try std.testing.expectEqualStrings("abcdef", b.contents);
+    try std.testing.expect(!b.dirty);
+}
+
+test "replaceFirst: hit composes deleteRange + insertAt correctly" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "hello WORLD hello");
+    defer b.deinit();
+    const did = try b.replaceFirst("hello", "HI");
+    try std.testing.expect(did);
+    try std.testing.expectEqualStrings("HI WORLD hello", b.contents);
+    try std.testing.expect(b.dirty);
+}
+
+test "replaceFirst: empty replacement equals delete-first-occurrence" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "remove ME please");
+    defer b.deinit();
+    const did = try b.replaceFirst("ME ", "");
+    try std.testing.expect(did);
+    try std.testing.expectEqualStrings("remove please", b.contents);
+    try std.testing.expect(b.dirty);
+}
+
+test "replaceFirst: empty pattern returns error.EmptyPattern" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcdef");
+    defer b.deinit();
+    try std.testing.expectError(error.EmptyPattern, b.replaceFirst("", "X"));
+    // Buffer unchanged; dirty NOT flipped.
+    try std.testing.expectEqualStrings("abcdef", b.contents);
+    try std.testing.expect(!b.dirty);
+}
+
+test "replaceFirst: replacement longer than pattern grows buffer correctly" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abc.def");
+    defer b.deinit();
+    const did = try b.replaceFirst(".", " AND ");
+    try std.testing.expect(did);
+    try std.testing.expectEqualStrings("abc AND def", b.contents);
+}
+
+test "replaceFirst: only replaces first occurrence, not all" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "a-b-c-d");
+    defer b.deinit();
+    const did = try b.replaceFirst("-", "+");
+    try std.testing.expect(did);
+    try std.testing.expectEqualStrings("a+b-c-d", b.contents);
+}
+
+test "property: replaceFirst matches std.mem.replace reference (500 trials)" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xF1D5_2EF_1ACE_0001);
+    const rand = prng.random();
+    var trial: usize = 0;
+    while (trial < 500) : (trial += 1) {
+        // Random haystack over a small alphabet so patterns actually hit.
+        const haystack_len = rand.intRangeAtMost(usize, 0, 128);
+        const haystack = try a.alloc(u8, haystack_len);
+        defer a.free(haystack);
+        for (haystack) |*c| c.* = rand.intRangeAtMost(u8, 'a', 'd');
+
+        // Pattern length 1-4 over the same alphabet.
+        const pat_len = rand.intRangeAtMost(usize, 1, 4);
+        const pattern = try a.alloc(u8, pat_len);
+        defer a.free(pattern);
+        for (pattern) |*c| c.* = rand.intRangeAtMost(u8, 'a', 'd');
+
+        // Replacement length 0-6 over a disjoint alphabet so it can't
+        // itself match the pattern.
+        const rep_len = rand.intRangeAtMost(usize, 0, 6);
+        const replacement = try a.alloc(u8, rep_len);
+        defer a.free(replacement);
+        for (replacement) |*c| c.* = rand.intRangeAtMost(u8, 'W', 'Z');
+
+        var b = try Buffer.fromBytes(a, .agent, "p", haystack);
+        defer b.deinit();
+        const did = try b.replaceFirst(pattern, replacement);
+
+        // Reference model: find first occurrence manually, splice once.
+        var expected: std.ArrayList(u8) = .empty;
+        defer expected.deinit(a);
+        if (std.mem.indexOf(u8, haystack, pattern)) |idx| {
+            try expected.appendSlice(a, haystack[0..idx]);
+            try expected.appendSlice(a, replacement);
+            try expected.appendSlice(a, haystack[idx + pat_len ..]);
+            try std.testing.expect(did);
+        } else {
+            try expected.appendSlice(a, haystack);
+            try std.testing.expect(!did);
+        }
+        try std.testing.expectEqualSlices(u8, expected.items, b.contents);
     }
 }
 

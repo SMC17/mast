@@ -926,6 +926,123 @@ fn cmd_buffer_delete(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet 
     return janet.janet_wrap_integer(@intCast(buf.contents.len));
 }
 
+/// `(buffer-find pattern)` — search the current buffer for `pattern`.
+/// Returns the integer byte offset of the first occurrence, or `nil` if
+/// not present / no buffer is open. Empty pattern returns 0 (matches
+/// `Buffer.findFirst` anchor convention; see docs there).
+///
+/// Closes the v1.5 script-surface gap: pre-v1.5 a Janet script had to
+/// reach into `(buffer-name)` + reload the file from disk to run a
+/// `string/find` against the bytes. Now the search lives next to the
+/// edit primitives so a `(buffer-replace ...)` is one expression.
+fn cmd_buffer_find(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc != 1) {
+        janet.janet_panicf("buffer-find: expected 1 argument (pattern), got %d", argc);
+    }
+    const buf = currentBuffer() orelse return janet.janet_wrap_nil();
+    const t = janet.janet_type(argv[0]);
+    if (t != janet.JANET_STRING and t != janet.JANET_BUFFER) {
+        janet.janet_panicf("buffer-find: argument must be string or buffer");
+    }
+    var p_ptr: [*c]const u8 = undefined;
+    var p_len: usize = 0;
+    if (t == janet.JANET_STRING) {
+        const sp = janet.janet_unwrap_string(argv[0]);
+        p_ptr = @ptrCast(sp);
+        p_len = @intCast(janet.janet_string_length(sp));
+    } else {
+        const jb = janet.janet_unwrap_buffer(argv[0]);
+        if (jb == null) return janet.janet_wrap_nil();
+        p_ptr = @ptrCast(jb.*.data);
+        p_len = @intCast(jb.*.count);
+    }
+    if (buf.findFirst(p_ptr[0..p_len])) |off| {
+        if (g_audit) |a| {
+            a.write("buffer-find", .{ .pattern_bytes = p_len, .offset = off }) catch {};
+        }
+        return janet.janet_wrap_integer(@intCast(off));
+    }
+    if (g_audit) |a| {
+        a.write("buffer-find", .{ .pattern_bytes = p_len, .offset = -1 }) catch {};
+    }
+    return janet.janet_wrap_nil();
+}
+
+/// `(buffer-replace pattern replacement)` — replace the first occurrence
+/// of `pattern` with `replacement` in the current buffer using
+/// `Buffer.replaceFirst` (deleteRange + insertAt under the hood).
+/// Returns `true` on success, `nil` if the pattern wasn't found / no
+/// buffer is open. An empty pattern panics (per `Buffer.replaceFirst`
+/// contract) rather than silently no-op'ing.
+///
+/// Marks the buffer dirty when a replacement happens; leaves it
+/// unchanged on miss. The composition stays inside the buffer module so
+/// the Janet surface is purely a thin transport — no edit logic
+/// duplicated here.
+fn cmd_buffer_replace(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc != 2) {
+        janet.janet_panicf("buffer-replace: expected 2 arguments (pattern replacement), got %d", argc);
+    }
+    const buf = currentBuffer() orelse return janet.janet_wrap_nil();
+
+    var p_ptr: [*c]const u8 = undefined;
+    var p_len: usize = 0;
+    var r_ptr: [*c]const u8 = undefined;
+    var r_len: usize = 0;
+
+    const tp = janet.janet_type(argv[0]);
+    if (tp != janet.JANET_STRING and tp != janet.JANET_BUFFER) {
+        janet.janet_panicf("buffer-replace: pattern must be string or buffer");
+    }
+    if (tp == janet.JANET_STRING) {
+        const sp = janet.janet_unwrap_string(argv[0]);
+        p_ptr = @ptrCast(sp);
+        p_len = @intCast(janet.janet_string_length(sp));
+    } else {
+        const jb = janet.janet_unwrap_buffer(argv[0]);
+        if (jb == null) return janet.janet_wrap_nil();
+        p_ptr = @ptrCast(jb.*.data);
+        p_len = @intCast(jb.*.count);
+    }
+
+    const tr = janet.janet_type(argv[1]);
+    if (tr != janet.JANET_STRING and tr != janet.JANET_BUFFER) {
+        janet.janet_panicf("buffer-replace: replacement must be string or buffer");
+    }
+    if (tr == janet.JANET_STRING) {
+        const sp = janet.janet_unwrap_string(argv[1]);
+        r_ptr = @ptrCast(sp);
+        r_len = @intCast(janet.janet_string_length(sp));
+    } else {
+        const jb = janet.janet_unwrap_buffer(argv[1]);
+        if (jb == null) return janet.janet_wrap_nil();
+        r_ptr = @ptrCast(jb.*.data);
+        r_len = @intCast(jb.*.count);
+    }
+
+    const did = buf.replaceFirst(p_ptr[0..p_len], r_ptr[0..r_len]) catch |e| {
+        // EmptyPattern is a usage error — surface it loudly so the
+        // script author knows the call was malformed. Allocation
+        // failures (rare; the splice allocates new contents) also panic
+        // since recovery is impossible from the Janet side.
+        janet.janet_panicf("buffer-replace: %s", @errorName(e).ptr);
+    };
+    if (did) {
+        if (g_audit) |a| {
+            a.write("buffer-replace", .{
+                .pattern_bytes = p_len,
+                .replacement_bytes = r_len,
+                .new_size = buf.contents.len,
+            }) catch {};
+        }
+        return janet.janet_wrap_true();
+    }
+    if (g_audit) |a| {
+        a.write("buffer-replace-miss", .{ .pattern_bytes = p_len }) catch {};
+    }
+    return janet.janet_wrap_nil();
+}
+
 /// `(buffer-switch idx)` — focus buffer at index. Returns the new index
 /// on success, or -1 if `idx` was out of range or unparseable. Accepts
 /// either an integer (from direct Janet) or a string (from the M-x
@@ -979,6 +1096,8 @@ const BUILTINS = [_]BuiltinCmd{
     .{ .name = "append", .janet_expr = "MAST_APPEND_SENTINEL", .description = "Append text to the current buffer (marks dirty)" },
     .{ .name = "insert", .janet_expr = "MAST_INSERT_SENTINEL", .description = "Insert text at offset: M-x insert <offset> <text...> (marks dirty)" },
     .{ .name = "delete", .janet_expr = "MAST_DELETE_SENTINEL", .description = "Delete byte-range [start,end): M-x delete <start> <end> (marks dirty)" },
+    .{ .name = "find", .janet_expr = "MAST_FIND_SENTINEL", .description = "Find first byte-offset of <pattern>; prints offset or not-found" },
+    .{ .name = "replace", .janet_expr = "MAST_REPLACE_SENTINEL", .description = "Replace first occurrence of <pattern> with <replacement> (marks dirty)" },
     .{ .name = "save", .janet_expr = "MAST_SAVE_SENTINEL", .description = "Save the current :file buffer atomically" },
     .{ .name = "save-as", .janet_expr = "MAST_SAVEAS_SENTINEL", .description = "Save buffer to a new path (becomes :file)" },
     .{ .name = "stax-search", .janet_expr = "(stax-bash (string \"stax-search \" $1))", .description = "Run stax-search Q" },
@@ -1003,6 +1122,8 @@ const HELP_TEXT =
     \\  M-x append <text…>      Append <text> + newline to current buffer
     \\  M-x insert <off> <txt…> Insert <txt> at byte-offset <off>
     \\  M-x delete <start> <end> Delete byte-range [start,end) from current buffer
+    \\  M-x find <pattern>      First byte-offset of <pattern>; prints offset or not-found
+    \\  M-x replace <pat> <rep> Replace first occurrence of <pat> with <rep>
     \\  M-x save                Atomically save current :file buffer
     \\  M-x save-as <path>      Save buffer to <path>; buffer becomes :file
     \\  M-x stax-search Q       Run stax-search Q (delegates to local CLI)
@@ -1316,6 +1437,90 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
                 }
                 continue;
             }
+            if (std.mem.eql(u8, b.janet_expr, "MAST_FIND_SENTINEL")) {
+                if (parsed.args.len < 1) {
+                    print("  (usage: M-x find <pattern>)\n\n", .{});
+                    try audit.write("mx-find-error", .{ .err = "usage" });
+                    continue;
+                }
+                if (currentBuffer()) |buf| {
+                    // Join multi-token patterns the same way `append` /
+                    // `insert` do so "M-x find hello world" searches for
+                    // the literal "hello world" (the parser pre-tokenized
+                    // on whitespace). The pattern intentionally does NOT
+                    // get a trailing newline appended — that would break
+                    // single-word searches.
+                    var combined: std.ArrayList(u8) = .empty;
+                    defer combined.deinit(allocator);
+                    for (parsed.args, 0..) |arg, i_arg| {
+                        if (i_arg > 0) try combined.append(allocator, ' ');
+                        try combined.appendSlice(allocator, arg);
+                    }
+                    if (buf.findFirst(combined.items)) |off| {
+                        print("  → offset {d}\n\n", .{off});
+                        try audit.write("buffer-find", .{
+                            .pattern_bytes = combined.items.len,
+                            .offset = off,
+                        });
+                    } else {
+                        print("  → not-found\n\n", .{});
+                        try audit.write("buffer-find", .{
+                            .pattern_bytes = combined.items.len,
+                            .offset = -1,
+                        });
+                    }
+                } else {
+                    print("  (no buffer open)\n\n", .{});
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, b.janet_expr, "MAST_REPLACE_SENTINEL")) {
+                if (parsed.args.len < 2) {
+                    print("  (usage: M-x replace <pattern> <replacement>)\n\n", .{});
+                    try audit.write("mx-replace-error", .{ .err = "usage" });
+                    continue;
+                }
+                if (currentBuffer()) |buf| {
+                    // M-x replace is a two-word verb: first token is the
+                    // pattern, ALL remaining tokens (joined by single
+                    // spaces) are the replacement. This biases the
+                    // surface toward the common case "replace foo a
+                    // longer phrase" — a pattern with whitespace would
+                    // need the Janet form `(buffer-replace ...)` instead,
+                    // which is the principled escape hatch.
+                    const pat = parsed.args[0];
+                    var rep: std.ArrayList(u8) = .empty;
+                    defer rep.deinit(allocator);
+                    for (parsed.args[1..], 0..) |arg, i_arg| {
+                        if (i_arg > 0) try rep.append(allocator, ' ');
+                        try rep.appendSlice(allocator, arg);
+                    }
+                    const did = buf.replaceFirst(pat, rep.items) catch |e| {
+                        if (e == error.EmptyPattern) {
+                            print("  (replace: pattern must not be empty)\n\n", .{});
+                            try audit.write("mx-replace-error", .{ .err = "empty-pattern" });
+                        } else {
+                            print("  (replace error: {})\n\n", .{e});
+                            try audit.write("mx-replace-error", .{ .err = @errorName(e) });
+                        }
+                        continue;
+                    };
+                    if (did) {
+                        print("  → replaced; buffer now {d} bytes, dirty\n\n", .{buf.contents.len});
+                        try audit.write("buffer-replace", .{
+                            .pattern_bytes = pat.len,
+                            .replacement_bytes = rep.items.len,
+                            .new_size = buf.contents.len,
+                        });
+                    } else {
+                        print("  → not-found\n\n", .{});
+                        try audit.write("buffer-replace-miss", .{ .pattern_bytes = pat.len });
+                    }
+                } else {
+                    print("  (no buffer open)\n\n", .{});
+                }
+                continue;
+            }
             if (std.mem.eql(u8, b.janet_expr, "MAST_SAVE_SENTINEL")) {
                 if (currentBuffer()) |buf| {
                     const n = buf.save() catch |e| {
@@ -1464,6 +1669,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     janet.janet_def(env, "buffer-switch", janet.janet_wrap_cfunction(cmd_buffer_switch), "(buffer-switch idx) — focus buffer at index, returns new index or -1.");
     janet.janet_def(env, "buffer-insert", janet.janet_wrap_cfunction(cmd_buffer_insert), "(buffer-insert offset text) — insert text at byte-offset; returns new size, or -1 on out-of-range.");
     janet.janet_def(env, "buffer-delete", janet.janet_wrap_cfunction(cmd_buffer_delete), "(buffer-delete start end) — delete byte-range [start,end); returns new size, or -1 on out-of-range.");
+    janet.janet_def(env, "buffer-find", janet.janet_wrap_cfunction(cmd_buffer_find), "(buffer-find pattern) — first byte offset of pattern in current buffer, or nil if absent / no buffer.");
+    janet.janet_def(env, "buffer-replace", janet.janet_wrap_cfunction(cmd_buffer_replace), "(buffer-replace pattern replacement) — replace first occurrence; returns true on hit, nil on miss. Empty pattern panics.");
     janet.janet_def(env, "agent/run", janet.janet_wrap_cfunction(cmd_agent_run), "(agent/run cmd) — spawn cmd, capture stdout into a new :agent buffer, return its index. Requires `exec`.");
     janet.janet_def(env, "agent/spawn", janet.janet_wrap_cfunction(cmd_agent_spawn), "(agent/spawn cmd) — non-blocking fork+exec; returns handle id. Buffer receives stdout via agent/poll. Requires `exec`.");
     janet.janet_def(env, "agent/poll", janet.janet_wrap_cfunction(cmd_agent_poll), "(agent/poll handle) — drain stdout into buffer; return exit status int if exited, nil otherwise.");
@@ -1787,6 +1994,71 @@ fn execute_mx_line(allocator: Allocator, env: *janet.JanetTable, audit: *Session
                     return;
                 };
                 try audit.write("buffer-delete", .{ .start = start, .end = end, .via = "tui" });
+            }
+            return;
+        }
+        if (std.mem.eql(u8, b.janet_expr, "MAST_FIND_SENTINEL")) {
+            if (parsed.args.len < 1) {
+                try audit.write("mx-find-error", .{ .err = "usage", .via = "tui" });
+                return;
+            }
+            if (currentBuffer()) |buf| {
+                var combined: std.ArrayList(u8) = .empty;
+                defer combined.deinit(allocator);
+                for (parsed.args, 0..) |arg, i_arg| {
+                    if (i_arg > 0) try combined.append(allocator, ' ');
+                    try combined.appendSlice(allocator, arg);
+                }
+                if (buf.findFirst(combined.items)) |off| {
+                    try audit.write("buffer-find", .{
+                        .pattern_bytes = combined.items.len,
+                        .offset = off,
+                        .via = "tui",
+                    });
+                } else {
+                    try audit.write("buffer-find", .{
+                        .pattern_bytes = combined.items.len,
+                        .offset = -1,
+                        .via = "tui",
+                    });
+                }
+            }
+            return;
+        }
+        if (std.mem.eql(u8, b.janet_expr, "MAST_REPLACE_SENTINEL")) {
+            if (parsed.args.len < 2) {
+                try audit.write("mx-replace-error", .{ .err = "usage", .via = "tui" });
+                return;
+            }
+            if (currentBuffer()) |buf| {
+                const pat = parsed.args[0];
+                var rep: std.ArrayList(u8) = .empty;
+                defer rep.deinit(allocator);
+                for (parsed.args[1..], 0..) |arg, i_arg| {
+                    if (i_arg > 0) try rep.append(allocator, ' ');
+                    try rep.appendSlice(allocator, arg);
+                }
+                const did = buf.replaceFirst(pat, rep.items) catch |e| {
+                    if (e == error.EmptyPattern) {
+                        try audit.write("mx-replace-error", .{ .err = "empty-pattern", .via = "tui" });
+                    } else {
+                        try audit.write("mx-replace-error", .{ .err = @errorName(e), .via = "tui" });
+                    }
+                    return;
+                };
+                if (did) {
+                    try audit.write("buffer-replace", .{
+                        .pattern_bytes = pat.len,
+                        .replacement_bytes = rep.items.len,
+                        .new_size = buf.contents.len,
+                        .via = "tui",
+                    });
+                } else {
+                    try audit.write("buffer-replace-miss", .{
+                        .pattern_bytes = pat.len,
+                        .via = "tui",
+                    });
+                }
             }
             return;
         }
