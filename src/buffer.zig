@@ -93,6 +93,66 @@ pub const Buffer = struct {
         self.dirty = true;
     }
 
+    /// Insert `bytes` at byte-offset `at`. `at == contents.len` is the
+    /// degenerate "insert at end" case and is identical to `append`.
+    /// `at > contents.len` is rejected as `error.OutOfRange` rather than
+    /// silently clamped, because the caller is mis-modeling the buffer
+    /// and a silent clamp turns a logic bug into a data bug.
+    ///
+    /// If the buffer's `mark` is at or past the insertion point, it is
+    /// shifted forward by `bytes.len` so a cursor stays "in front of"
+    /// the inserted text rather than landing in the middle of it. This
+    /// is the principle-of-least-surprise contract real editors use.
+    ///
+    /// Marks the buffer dirty.
+    pub fn insertAt(self: *Buffer, at: usize, bytes: []const u8) !void {
+        if (at > self.contents.len) return error.OutOfRange;
+        if (bytes.len == 0) return; // no-op, no dirty flip
+
+        const new_len = self.contents.len + bytes.len;
+        const copy = try self.allocator.alloc(u8, new_len);
+        @memcpy(copy[0..at], self.contents[0..at]);
+        @memcpy(copy[at .. at + bytes.len], bytes);
+        @memcpy(copy[at + bytes.len ..], self.contents[at..]);
+        self.allocator.free(self.contents);
+        self.contents = copy;
+        if (self.mark >= at) self.mark += bytes.len;
+        self.dirty = true;
+    }
+
+    /// Delete the byte range `[start, end)`. `start == end` is a no-op
+    /// (does NOT flip dirty). `end > contents.len` or `start > end` is
+    /// rejected as `error.OutOfRange` — silent clamping has the same
+    /// failure mode as `insertAt` above.
+    ///
+    /// `mark` is updated to track the deletion:
+    ///   - if mark < start, mark is unchanged
+    ///   - if start <= mark < end, mark snaps to start (cursor was in
+    ///     the deleted range; land it at the deletion point)
+    ///   - if mark >= end, mark shifts left by (end - start)
+    ///
+    /// Marks the buffer dirty (when range is non-empty).
+    pub fn deleteRange(self: *Buffer, start: usize, end: usize) !void {
+        if (start > end) return error.OutOfRange;
+        if (end > self.contents.len) return error.OutOfRange;
+        if (start == end) return; // no-op, no dirty flip
+
+        const del_len = end - start;
+        const new_len = self.contents.len - del_len;
+        const copy = try self.allocator.alloc(u8, new_len);
+        @memcpy(copy[0..start], self.contents[0..start]);
+        @memcpy(copy[start..], self.contents[end..]);
+        self.allocator.free(self.contents);
+        self.contents = copy;
+
+        if (self.mark >= end) {
+            self.mark -= del_len;
+        } else if (self.mark > start) {
+            self.mark = start;
+        }
+        self.dirty = true;
+    }
+
     /// Write the buffer to disk. For `:file` kind, writes to its `name`
     /// path. For other kinds, the caller MUST supply a path via `saveAs`.
     /// Returns the number of bytes written.
@@ -486,6 +546,207 @@ test "buffer.saveAs converts an :agent buffer into a :file buffer" {
     const c_path = try a.dupeZ(u8, tmp_path);
     defer a.free(c_path);
     _ = libc.unlink(@ptrCast(c_path.ptr));
+}
+
+// ---------------------------------------------------------------------------
+// insertAt / deleteRange — random-access editing primitives.
+// These close the v1.4 gap "the buffer protocol only supports end-append and
+// full-replace; real editing requires offset-positioned insert and delete."
+// ---------------------------------------------------------------------------
+
+test "insertAt: at start prepends bytes + shifts mark forward" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "world");
+    defer b.deinit();
+    b.mark = 3; // cursor inside "world"
+    try b.insertAt(0, "hello, ");
+    try std.testing.expectEqualStrings("hello, world", b.contents);
+    try std.testing.expect(b.dirty);
+    try std.testing.expectEqual(@as(usize, 10), b.mark); // 3 + 7
+}
+
+test "insertAt: at middle splits + interleaves" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcXYZ");
+    defer b.deinit();
+    try b.insertAt(3, "123");
+    try std.testing.expectEqualStrings("abc123XYZ", b.contents);
+}
+
+test "insertAt: at end == append behavior" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abc");
+    defer b.deinit();
+    try b.insertAt(3, "def");
+    try std.testing.expectEqualStrings("abcdef", b.contents);
+}
+
+test "insertAt: past-end rejected (no silent clamp)" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abc");
+    defer b.deinit();
+    try std.testing.expectError(error.OutOfRange, b.insertAt(99, "X"));
+    // Buffer unchanged, NOT dirty after rejected op.
+    try std.testing.expectEqualStrings("abc", b.contents);
+    try std.testing.expect(!b.dirty);
+}
+
+test "insertAt: empty-bytes is no-op (does NOT flip dirty)" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abc");
+    defer b.deinit();
+    try std.testing.expect(!b.dirty);
+    try b.insertAt(1, "");
+    try std.testing.expectEqualStrings("abc", b.contents);
+    try std.testing.expect(!b.dirty);
+}
+
+test "insertAt: mark before insertion point is NOT shifted" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcdef");
+    defer b.deinit();
+    b.mark = 2;
+    try b.insertAt(4, "XYZ");
+    try std.testing.expectEqualStrings("abcdXYZef", b.contents);
+    try std.testing.expectEqual(@as(usize, 2), b.mark);
+}
+
+test "deleteRange: middle excision shrinks buffer + clamps mark" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcXYZdef");
+    defer b.deinit();
+    b.mark = 5; // inside the doomed range [3,6)
+    try b.deleteRange(3, 6);
+    try std.testing.expectEqualStrings("abcdef", b.contents);
+    try std.testing.expect(b.dirty);
+    try std.testing.expectEqual(@as(usize, 3), b.mark); // snapped to start
+}
+
+test "deleteRange: mark after deletion shifts left by deleted-len" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcXYZdef");
+    defer b.deinit();
+    b.mark = 8; // past end of deletion
+    try b.deleteRange(3, 6);
+    try std.testing.expectEqualStrings("abcdef", b.contents);
+    try std.testing.expectEqual(@as(usize, 5), b.mark); // 8 - 3
+}
+
+test "deleteRange: mark before deletion unchanged" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcXYZdef");
+    defer b.deinit();
+    b.mark = 2;
+    try b.deleteRange(3, 6);
+    try std.testing.expectEqual(@as(usize, 2), b.mark);
+}
+
+test "deleteRange: empty range is no-op (does NOT flip dirty)" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abc");
+    defer b.deinit();
+    try std.testing.expect(!b.dirty);
+    try b.deleteRange(1, 1);
+    try std.testing.expectEqualStrings("abc", b.contents);
+    try std.testing.expect(!b.dirty);
+}
+
+test "deleteRange: full-buffer deletion empties contents" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcdef");
+    defer b.deinit();
+    try b.deleteRange(0, 6);
+    try std.testing.expectEqualStrings("", b.contents);
+    try std.testing.expect(b.dirty);
+}
+
+test "deleteRange: end past contents rejected" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abc");
+    defer b.deinit();
+    try std.testing.expectError(error.OutOfRange, b.deleteRange(0, 99));
+    try std.testing.expectEqualStrings("abc", b.contents);
+    try std.testing.expect(!b.dirty);
+}
+
+test "deleteRange: start > end rejected" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcdef");
+    defer b.deinit();
+    try std.testing.expectError(error.OutOfRange, b.deleteRange(4, 2));
+    try std.testing.expectEqualStrings("abcdef", b.contents);
+    try std.testing.expect(!b.dirty);
+}
+
+test "property: insertAt then deleteRange round-trips across 1000 random shapes" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xFEED_BEEF_CAFE_0000);
+    const rand = prng.random();
+    var trial: usize = 0;
+    while (trial < 1000) : (trial += 1) {
+        const base_len = rand.intRangeAtMost(usize, 0, 128);
+        const base = try a.alloc(u8, base_len);
+        defer a.free(base);
+        for (base) |*c| c.* = rand.intRangeAtMost(u8, 'a', 'z');
+
+        var b = try Buffer.fromBytes(a, .agent, "p", base);
+        defer b.deinit();
+
+        const at = if (base_len == 0) 0 else rand.intRangeAtMost(usize, 0, base_len);
+        const ins_len = rand.intRangeAtMost(usize, 0, 32);
+        const ins = try a.alloc(u8, ins_len);
+        defer a.free(ins);
+        for (ins) |*c| c.* = rand.intRangeAtMost(u8, 'A', 'Z');
+
+        try b.insertAt(at, ins);
+        try std.testing.expectEqual(base_len + ins_len, b.contents.len);
+
+        // Delete the inserted run — buffer must be byte-identical to base.
+        try b.deleteRange(at, at + ins_len);
+        try std.testing.expectEqualSlices(u8, base, b.contents);
+    }
+}
+
+test "property: insertAt+deleteRange match model across 500 random sequences" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xDEAD_C0DE_DEAD_BEEF);
+    const rand = prng.random();
+    var trial: usize = 0;
+    while (trial < 500) : (trial += 1) {
+        const init_len = rand.intRangeAtMost(usize, 0, 32);
+        const init_bytes = try a.alloc(u8, init_len);
+        defer a.free(init_bytes);
+        for (init_bytes) |*c| c.* = rand.intRangeAtMost(u8, 'a', 'z');
+
+        var b = try Buffer.fromBytes(a, .agent, "p", init_bytes);
+        defer b.deinit();
+
+        var model: std.ArrayList(u8) = .empty;
+        defer model.deinit(a);
+        try model.appendSlice(a, init_bytes);
+
+        const num_ops = rand.intRangeAtMost(usize, 1, 10);
+        var op: usize = 0;
+        while (op < num_ops) : (op += 1) {
+            if (rand.boolean() and model.items.len > 0) {
+                // deleteRange a random sub-range
+                const s = rand.intRangeAtMost(usize, 0, model.items.len);
+                const e = rand.intRangeAtMost(usize, s, model.items.len);
+                try b.deleteRange(s, e);
+                model.replaceRangeAssumeCapacity(s, e - s, &.{});
+            } else {
+                // insertAt a random offset
+                const at = rand.intRangeAtMost(usize, 0, model.items.len);
+                const ins_len = rand.intRangeAtMost(usize, 0, 16);
+                const ins = try a.alloc(u8, ins_len);
+                defer a.free(ins);
+                for (ins) |*c| c.* = rand.intRangeAtMost(u8, '0', '9');
+                try b.insertAt(at, ins);
+                try model.insertSlice(a, at, ins);
+            }
+            try std.testing.expectEqualSlices(u8, model.items, b.contents);
+        }
+    }
 }
 
 // ============================================================================

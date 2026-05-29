@@ -6,6 +6,64 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Editing primitives: `insertAt` + `deleteRange` (2026-05-29)
+
+Closes a load-bearing buffer-protocol gap. Pre-this-commit, the buffer
+surface exposed `append` (end-only) and `setContents` (full replace) but
+no offset-positioned mutation. Real editing — cursor-insert, region
+delete, surgical refactor — could not be expressed through the protocol;
+scripts had to copy the whole buffer, mutate the copy, and `setContents`
+back. That is O(n) per edit and loses the dirty-flag + mark-tracking
+contract.
+
+**New on `Buffer`:**
+
+- `insertAt(at: usize, bytes: []const u8) !void` — insert at byte
+  offset; rejects `at > contents.len` as `error.OutOfRange` (no silent
+  clamp); shifts `mark` forward by `bytes.len` if mark was at or past
+  the insertion point; no-ops on empty input (does NOT flip dirty).
+- `deleteRange(start: usize, end: usize) !void` — delete `[start, end)`;
+  rejects `end > contents.len` and `start > end` as `error.OutOfRange`;
+  updates `mark` per documented rules (snaps to start when mark was in
+  the deleted range; shifts left otherwise); no-ops on empty range
+  (does NOT flip dirty).
+
+**New Janet bindings:**
+
+- `(buffer-insert offset text)` — returns new size, or `-1` on
+  out-of-range. Accepts string OR buffer for the text argument; offset
+  accepts integer OR stringified-integer (matches `buffer-switch`
+  positional-arg semantics).
+- `(buffer-delete start end)` — returns new size, or `-1` on
+  out-of-range.
+
+**New M-x verbs:**
+
+- `M-x insert <offset> <text...>` — positional-arg substitution; payload
+  reassembles whitespace-split args.
+- `M-x delete <start> <end>` — integer positional args.
+
+Both verbs route through the TUI minibuffer handler as well as the REPL,
+and emit `buffer-insert` / `buffer-delete` audit events with full
+offset/range payload. `mx-insert-error` / `mx-delete-error` records
+parse failures and `out-of-range` rejections.
+
+**Tests:** 79/79 (up from 49/49). 12 new unit tests cover prepend,
+mid-insert, end-append-degeneracy, past-end rejection, empty-input
+no-op, mark-not-shifted-when-before-insertion, mid-delete-snaps-mark,
+post-delete-shifts-mark-left, mark-before-delete-unchanged, empty-range
+no-op, full-buffer-deletion, end-past-contents rejection, start-greater-
+than-end rejection. 2 new property tests: 1000-trial insert/delete
+round-trip (insert at random offset, then delete the inserted run,
+must return to the original buffer byte-for-byte), and 500-trial
+mixed-op sequence against a `std.ArrayList` model implementation.
+
+cfunction-audit: 18 cfunctions (was 15), 0 violations. doctest: 25/25
+PASS (no regression). quota_integration: 8/8 PASS.
+
+API-additive: 2 new Buffer methods, 2 new Janet bindings, 2 new M-x
+verbs. No removals, no signature changes.
+
 ### Test-count drift catch — 2026-05-22
 
 `~/agent-fleet/spec/drift-check` (the SpecFleet automated C5 enforcement tool) surfaced a Type-I under-claim drift on day-zero deployment:

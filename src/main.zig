@@ -839,6 +839,93 @@ fn cmd_agent_run(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
     return janet.janet_wrap_integer(@intCast(new_idx));
 }
 
+/// Unwrap an integer-or-stringified-integer argument from Janet, returning
+/// `null` on parse failure / unsupported type. Used by the buffer-insert /
+/// buffer-delete / buffer-switch cfunctions which all accept positional
+/// integer args that go through the M-x string-quote substitution path.
+fn unwrapIntArg(v: janet.Janet) ?i64 {
+    const t = janet.janet_type(v);
+    if (t == janet.JANET_NUMBER) {
+        return @as(i64, janet.janet_unwrap_integer(v));
+    }
+    if (t == janet.JANET_STRING) {
+        const s_ptr = janet.janet_unwrap_string(v);
+        const len = janet.janet_string_length(s_ptr);
+        if (len == 0) return null;
+        const bytes = @as([*]const u8, @ptrCast(s_ptr))[0..@intCast(len)];
+        return std.fmt.parseInt(i64, bytes, 10) catch null;
+    }
+    return null;
+}
+
+/// `(buffer-insert offset text)` — insert `text` at byte-offset `offset`
+/// in the current buffer. Returns the buffer's new byte length, or -1 if
+/// the offset was out of range or no buffer is open. Marks dirty.
+///
+/// Closes the v1.4 protocol gap: pre-v1.4 the Janet surface could only
+/// append at end or replace whole-buffer. `buffer-insert` is the
+/// random-access write primitive every real editor needs.
+fn cmd_buffer_insert(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc != 2) {
+        janet.janet_panicf("buffer-insert: expected 2 arguments (offset text), got %d", argc);
+    }
+    const buf = currentBuffer() orelse return janet.janet_wrap_integer(-1);
+    const off_i = unwrapIntArg(argv[0]) orelse return janet.janet_wrap_integer(-1);
+    if (off_i < 0) return janet.janet_wrap_integer(-1);
+    const off: usize = @intCast(off_i);
+
+    const t = janet.janet_type(argv[1]);
+    if (t != janet.JANET_STRING and t != janet.JANET_BUFFER) {
+        janet.janet_panicf("buffer-insert: second argument must be string or buffer");
+    }
+    var s_ptr: [*c]const u8 = undefined;
+    var s_len: usize = 0;
+    if (t == janet.JANET_STRING) {
+        const sp = janet.janet_unwrap_string(argv[1]);
+        s_ptr = @ptrCast(sp);
+        s_len = @intCast(janet.janet_string_length(sp));
+    } else {
+        const jb = janet.janet_unwrap_buffer(argv[1]);
+        if (jb == null) return janet.janet_wrap_integer(-1);
+        s_ptr = @ptrCast(jb.*.data);
+        s_len = @intCast(jb.*.count);
+    }
+
+    buf.insertAt(off, s_ptr[0..s_len]) catch |e| {
+        if (e == error.OutOfRange) return janet.janet_wrap_integer(-1);
+        janet.janet_panicf("buffer-insert: %s", @errorName(e).ptr);
+    };
+    if (g_audit) |a| {
+        a.write("buffer-insert", .{ .offset = off, .bytes = s_len }) catch {};
+    }
+    return janet.janet_wrap_integer(@intCast(buf.contents.len));
+}
+
+/// `(buffer-delete start end)` — delete the byte range `[start, end)` in
+/// the current buffer. Returns the buffer's new byte length, or -1 if
+/// the range was out of order, past end, or no buffer is open. Marks
+/// dirty when the range is non-empty.
+fn cmd_buffer_delete(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc != 2) {
+        janet.janet_panicf("buffer-delete: expected 2 arguments (start end), got %d", argc);
+    }
+    const buf = currentBuffer() orelse return janet.janet_wrap_integer(-1);
+    const s_i = unwrapIntArg(argv[0]) orelse return janet.janet_wrap_integer(-1);
+    const e_i = unwrapIntArg(argv[1]) orelse return janet.janet_wrap_integer(-1);
+    if (s_i < 0 or e_i < 0) return janet.janet_wrap_integer(-1);
+    const s: usize = @intCast(s_i);
+    const e: usize = @intCast(e_i);
+
+    buf.deleteRange(s, e) catch |err| {
+        if (err == error.OutOfRange) return janet.janet_wrap_integer(-1);
+        janet.janet_panicf("buffer-delete: %s", @errorName(err).ptr);
+    };
+    if (g_audit) |a| {
+        a.write("buffer-delete", .{ .start = s, .end = e }) catch {};
+    }
+    return janet.janet_wrap_integer(@intCast(buf.contents.len));
+}
+
 /// `(buffer-switch idx)` — focus buffer at index. Returns the new index
 /// on success, or -1 if `idx` was out of range or unparseable. Accepts
 /// either an integer (from direct Janet) or a string (from the M-x
@@ -890,6 +977,8 @@ const BUILTINS = [_]BuiltinCmd{
     .{ .name = "new-buffer", .janet_expr = "MAST_NEWBUFFER_SENTINEL", .description = "Create a new empty :agent buffer named <name>" },
     .{ .name = "agent-run", .janet_expr = "(agent/run $1)", .description = "Spawn $1 as a shell command, capture stdout to a new :agent buffer" },
     .{ .name = "append", .janet_expr = "MAST_APPEND_SENTINEL", .description = "Append text to the current buffer (marks dirty)" },
+    .{ .name = "insert", .janet_expr = "MAST_INSERT_SENTINEL", .description = "Insert text at offset: M-x insert <offset> <text...> (marks dirty)" },
+    .{ .name = "delete", .janet_expr = "MAST_DELETE_SENTINEL", .description = "Delete byte-range [start,end): M-x delete <start> <end> (marks dirty)" },
     .{ .name = "save", .janet_expr = "MAST_SAVE_SENTINEL", .description = "Save the current :file buffer atomically" },
     .{ .name = "save-as", .janet_expr = "MAST_SAVEAS_SENTINEL", .description = "Save buffer to a new path (becomes :file)" },
     .{ .name = "stax-search", .janet_expr = "(stax-bash (string \"stax-search \" $1))", .description = "Run stax-search Q" },
@@ -912,6 +1001,8 @@ const HELP_TEXT =
     \\  M-x new-buffer <name>   Create a new empty :agent buffer
     \\  M-x agent-run <cmd>     Spawn <cmd>, capture stdout to a new :agent buffer
     \\  M-x append <text…>      Append <text> + newline to current buffer
+    \\  M-x insert <off> <txt…> Insert <txt> at byte-offset <off>
+    \\  M-x delete <start> <end> Delete byte-range [start,end) from current buffer
     \\  M-x save                Atomically save current :file buffer
     \\  M-x save-as <path>      Save buffer to <path>; buffer becomes :file
     \\  M-x stax-search Q       Run stax-search Q (delegates to local CLI)
@@ -1153,6 +1244,78 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
                 }
                 continue;
             }
+            if (std.mem.eql(u8, b.janet_expr, "MAST_INSERT_SENTINEL")) {
+                if (parsed.args.len < 2) {
+                    print("  (usage: M-x insert <offset> <text...>)\n\n", .{});
+                    continue;
+                }
+                const off = std.fmt.parseInt(usize, parsed.args[0], 10) catch {
+                    print("  (insert: offset must be a non-negative integer)\n\n", .{});
+                    try audit.write("mx-insert-error", .{ .err = "bad-offset" });
+                    continue;
+                };
+                if (currentBuffer()) |buf| {
+                    var combined: std.ArrayList(u8) = .empty;
+                    defer combined.deinit(allocator);
+                    for (parsed.args[1..], 0..) |arg, i_arg| {
+                        if (i_arg > 0) try combined.append(allocator, ' ');
+                        try combined.appendSlice(allocator, arg);
+                    }
+                    buf.insertAt(off, combined.items) catch |e| {
+                        if (e == error.OutOfRange) {
+                            print("  (insert: offset {d} is past buffer end ({d} bytes))\n\n",
+                                  .{ off, buf.contents.len });
+                            try audit.write("mx-insert-error", .{ .err = "out-of-range", .offset = off });
+                        } else {
+                            print("  (insert error: {})\n\n", .{e});
+                            try audit.write("mx-insert-error", .{ .err = @errorName(e) });
+                        }
+                        continue;
+                    };
+                    print("  → inserted {d} bytes at offset {d}; buffer now {d} bytes, dirty\n\n",
+                          .{ combined.items.len, off, buf.contents.len });
+                    try audit.write("buffer-insert", .{ .offset = off, .bytes = combined.items.len });
+                } else {
+                    print("  (no buffer open)\n\n", .{});
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, b.janet_expr, "MAST_DELETE_SENTINEL")) {
+                if (parsed.args.len < 2) {
+                    print("  (usage: M-x delete <start> <end>)\n\n", .{});
+                    continue;
+                }
+                const start = std.fmt.parseInt(usize, parsed.args[0], 10) catch {
+                    print("  (delete: start must be a non-negative integer)\n\n", .{});
+                    try audit.write("mx-delete-error", .{ .err = "bad-start" });
+                    continue;
+                };
+                const end = std.fmt.parseInt(usize, parsed.args[1], 10) catch {
+                    print("  (delete: end must be a non-negative integer)\n\n", .{});
+                    try audit.write("mx-delete-error", .{ .err = "bad-end" });
+                    continue;
+                };
+                if (currentBuffer()) |buf| {
+                    const before = buf.contents.len;
+                    buf.deleteRange(start, end) catch |e| {
+                        if (e == error.OutOfRange) {
+                            print("  (delete: range [{d},{d}) is invalid for buffer of {d} bytes)\n\n",
+                                  .{ start, end, buf.contents.len });
+                            try audit.write("mx-delete-error", .{ .err = "out-of-range", .start = start, .end = end });
+                        } else {
+                            print("  (delete error: {})\n\n", .{e});
+                            try audit.write("mx-delete-error", .{ .err = @errorName(e) });
+                        }
+                        continue;
+                    };
+                    print("  → deleted {d} bytes from [{d},{d}); buffer now {d} bytes, dirty\n\n",
+                          .{ before - buf.contents.len, start, end, buf.contents.len });
+                    try audit.write("buffer-delete", .{ .start = start, .end = end });
+                } else {
+                    print("  (no buffer open)\n\n", .{});
+                }
+                continue;
+            }
             if (std.mem.eql(u8, b.janet_expr, "MAST_SAVE_SENTINEL")) {
                 if (currentBuffer()) |buf| {
                     const n = buf.save() catch |e| {
@@ -1299,6 +1462,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     janet.janet_def(env, "buffer-next", janet.janet_wrap_cfunction(cmd_buffer_next), "Cycle focus forward; returns new index.");
     janet.janet_def(env, "buffer-prev", janet.janet_wrap_cfunction(cmd_buffer_prev), "Cycle focus backward; returns new index.");
     janet.janet_def(env, "buffer-switch", janet.janet_wrap_cfunction(cmd_buffer_switch), "(buffer-switch idx) — focus buffer at index, returns new index or -1.");
+    janet.janet_def(env, "buffer-insert", janet.janet_wrap_cfunction(cmd_buffer_insert), "(buffer-insert offset text) — insert text at byte-offset; returns new size, or -1 on out-of-range.");
+    janet.janet_def(env, "buffer-delete", janet.janet_wrap_cfunction(cmd_buffer_delete), "(buffer-delete start end) — delete byte-range [start,end); returns new size, or -1 on out-of-range.");
     janet.janet_def(env, "agent/run", janet.janet_wrap_cfunction(cmd_agent_run), "(agent/run cmd) — spawn cmd, capture stdout into a new :agent buffer, return its index. Requires `exec`.");
     janet.janet_def(env, "agent/spawn", janet.janet_wrap_cfunction(cmd_agent_spawn), "(agent/spawn cmd) — non-blocking fork+exec; returns handle id. Buffer receives stdout via agent/poll. Requires `exec`.");
     janet.janet_def(env, "agent/poll", janet.janet_wrap_cfunction(cmd_agent_poll), "(agent/poll handle) — drain stdout into buffer; return exit status int if exited, nil otherwise.");
@@ -1576,6 +1741,52 @@ fn execute_mx_line(allocator: Allocator, env: *janet.JanetTable, audit: *Session
                     return;
                 };
                 try audit.write("buffer-append", .{ .bytes = combined.items.len, .via = "tui" });
+            }
+            return;
+        }
+        if (std.mem.eql(u8, b.janet_expr, "MAST_INSERT_SENTINEL")) {
+            if (parsed.args.len < 2) {
+                try audit.write("mx-insert-error", .{ .err = "usage", .via = "tui" });
+                return;
+            }
+            const off = std.fmt.parseInt(usize, parsed.args[0], 10) catch {
+                try audit.write("mx-insert-error", .{ .err = "bad-offset", .via = "tui" });
+                return;
+            };
+            if (currentBuffer()) |buf| {
+                var combined: std.ArrayList(u8) = .empty;
+                defer combined.deinit(allocator);
+                for (parsed.args[1..], 0..) |arg, i_arg| {
+                    if (i_arg > 0) try combined.append(allocator, ' ');
+                    try combined.appendSlice(allocator, arg);
+                }
+                buf.insertAt(off, combined.items) catch |e| {
+                    try audit.write("mx-insert-error", .{ .err = @errorName(e), .via = "tui" });
+                    return;
+                };
+                try audit.write("buffer-insert", .{ .offset = off, .bytes = combined.items.len, .via = "tui" });
+            }
+            return;
+        }
+        if (std.mem.eql(u8, b.janet_expr, "MAST_DELETE_SENTINEL")) {
+            if (parsed.args.len < 2) {
+                try audit.write("mx-delete-error", .{ .err = "usage", .via = "tui" });
+                return;
+            }
+            const start = std.fmt.parseInt(usize, parsed.args[0], 10) catch {
+                try audit.write("mx-delete-error", .{ .err = "bad-start", .via = "tui" });
+                return;
+            };
+            const end = std.fmt.parseInt(usize, parsed.args[1], 10) catch {
+                try audit.write("mx-delete-error", .{ .err = "bad-end", .via = "tui" });
+                return;
+            };
+            if (currentBuffer()) |buf| {
+                buf.deleteRange(start, end) catch |e| {
+                    try audit.write("mx-delete-error", .{ .err = @errorName(e), .via = "tui" });
+                    return;
+                };
+                try audit.write("buffer-delete", .{ .start = start, .end = end, .via = "tui" });
             }
             return;
         }
