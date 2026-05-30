@@ -200,6 +200,69 @@ pub const Buffer = struct {
         return true;
     }
 
+    /// Return every non-overlapping byte offset at which `pattern`
+    /// starts in the buffer. The returned slice is owned by the caller
+    /// and must be freed with `allocator.free`. Empty pattern returns
+    /// `error.EmptyPattern`; same disambiguation as `replaceFirst`:
+    /// "match every position" would yield contents.len+1 zero-width
+    /// offsets, which is never what the caller meant and would explode
+    /// the allocator on large buffers.
+    ///
+    /// Overlap convention: non-overlapping, left-anchored. For
+    /// haystack "aaaa" with pattern "aa" the offsets are `[0, 2]`, not
+    /// `[0, 1, 2]`. After each hit at offset `o` the scanner advances
+    /// to `o + pattern.len`. This is the same convention `tr` /
+    /// `grep -o` / `std.mem.replaceOwned` use.
+    pub fn findAll(self: *const Buffer, allocator: std.mem.Allocator, pattern: []const u8) ![]usize {
+        if (pattern.len == 0) return error.EmptyPattern;
+        var hits: std.ArrayList(usize) = .empty;
+        errdefer hits.deinit(allocator);
+        var cursor: usize = 0;
+        while (cursor <= self.contents.len) {
+            const found = self.findFrom(pattern, cursor) orelse break;
+            try hits.append(allocator, found);
+            cursor = found + pattern.len;
+        }
+        return hits.toOwnedSlice(allocator);
+    }
+
+    /// Replace every non-overlapping occurrence of `pattern` with
+    /// `replacement` by composing `findFrom` + `deleteRange` +
+    /// `insertAt` in a forward-walking loop. Returns the count of
+    /// replacements made (0 if pattern not present).
+    ///
+    /// The cursor advances past each insertion (`cursor = at +
+    /// replacement.len`), so a `(replace-all "a" "aa")` terminates
+    /// after touching every original `a` exactly once; the
+    /// newly-inserted "aa" is NOT re-scanned. This matches
+    /// `std.mem.replaceOwned` semantics and is the only termination-
+    /// safe convention when replacement may contain pattern.
+    ///
+    /// Empty `pattern` returns `error.EmptyPattern` for the same
+    /// reason `replaceFirst` does; the alternative is an infinite
+    /// loop or an N+1 zero-width insert. Empty `replacement` is the
+    /// natural "delete all occurrences" composition and is supported.
+    pub fn replaceAll(self: *Buffer, pattern: []const u8, replacement: []const u8) !usize {
+        if (pattern.len == 0) return error.EmptyPattern;
+        var count: usize = 0;
+        var cursor: usize = 0;
+        while (cursor <= self.contents.len) {
+            const at = self.findFrom(pattern, cursor) orelse break;
+            // Composition order matches replaceFirst: deleteRange first
+            // so the pattern's offset is still valid, then insertAt at
+            // the same offset.
+            try self.deleteRange(at, at + pattern.len);
+            try self.insertAt(at, replacement);
+            count += 1;
+            // Walk forward past the inserted bytes. If we left cursor at
+            // `at` and replacement starts with pattern (e.g. pattern="a"
+            // replacement="aa"), the next iteration would match again
+            // and spin forever.
+            cursor = at + replacement.len;
+        }
+        return count;
+    }
+
     /// Write the buffer to disk. For `:file` kind, writes to its `name`
     /// path. For other kinds, the caller MUST supply a path via `saveAs`.
     /// Returns the number of bytes written.
@@ -1045,6 +1108,263 @@ test "property: replaceFirst matches std.mem.replace reference (500 trials)" {
             try std.testing.expect(!did);
         }
         try std.testing.expectEqualSlices(u8, expected.items, b.contents);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// findAll / replaceAll: bulk-replace primitive. The composition is
+// findFrom + deleteRange + insertAt in a forward-walking loop. The
+// load-bearing invariants are:
+//   (a) non-overlapping, left-anchored offsets (matches std.mem semantics)
+//   (b) replaceAll terminates even when replacement contains pattern
+//       (cursor advances past inserted bytes, not past original pattern)
+//   (c) empty pattern is rejected as EmptyPattern (same disambiguation
+//       as replaceFirst; N+1 zero-width hits or infinite loop)
+// ---------------------------------------------------------------------------
+
+test "findAll: 0 hits on empty buffer returns empty slice" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "");
+    defer b.deinit();
+    const hits = try b.findAll(a, "abc");
+    defer a.free(hits);
+    try std.testing.expectEqual(@as(usize, 0), hits.len);
+}
+
+test "findAll: 0 hits when pattern absent returns empty slice" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "the quick brown fox");
+    defer b.deinit();
+    const hits = try b.findAll(a, "zebra");
+    defer a.free(hits);
+    try std.testing.expectEqual(@as(usize, 0), hits.len);
+}
+
+test "findAll: 1 hit returns single offset" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcXYZdef");
+    defer b.deinit();
+    const hits = try b.findAll(a, "XYZ");
+    defer a.free(hits);
+    try std.testing.expectEqual(@as(usize, 1), hits.len);
+    try std.testing.expectEqual(@as(usize, 3), hits[0]);
+}
+
+test "findAll: N non-overlapping hits returns all offsets in order" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "ab cd ab ef ab gh");
+    defer b.deinit();
+    const hits = try b.findAll(a, "ab");
+    defer a.free(hits);
+    try std.testing.expectEqual(@as(usize, 3), hits.len);
+    try std.testing.expectEqual(@as(usize, 0), hits[0]);
+    try std.testing.expectEqual(@as(usize, 6), hits[1]);
+    try std.testing.expectEqual(@as(usize, 12), hits[2]);
+}
+
+test "findAll: overlapping pattern uses non-overlapping convention" {
+    // Haystack "aaaa" with pattern "aa": the documented convention is
+    // non-overlapping, left-anchored: after matching at 0 the cursor
+    // jumps to 2 (past the matched run), NOT 1. So hits are [0, 2],
+    // not [0, 1, 2]. This matches std.mem / tr / grep -o.
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "aaaa");
+    defer b.deinit();
+    const hits = try b.findAll(a, "aa");
+    defer a.free(hits);
+    try std.testing.expectEqual(@as(usize, 2), hits.len);
+    try std.testing.expectEqual(@as(usize, 0), hits[0]);
+    try std.testing.expectEqual(@as(usize, 2), hits[1]);
+}
+
+test "findAll: empty pattern returns error.EmptyPattern" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcdef");
+    defer b.deinit();
+    try std.testing.expectError(error.EmptyPattern, b.findAll(a, ""));
+}
+
+test "findAll: single-byte pattern across whole buffer" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "a-b-c-d-e");
+    defer b.deinit();
+    const hits = try b.findAll(a, "-");
+    defer a.free(hits);
+    try std.testing.expectEqual(@as(usize, 4), hits.len);
+    try std.testing.expectEqual(@as(usize, 1), hits[0]);
+    try std.testing.expectEqual(@as(usize, 3), hits[1]);
+    try std.testing.expectEqual(@as(usize, 5), hits[2]);
+    try std.testing.expectEqual(@as(usize, 7), hits[3]);
+}
+
+test "replaceAll: 0-hit no-op returns 0 and does not flip dirty" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "the quick brown fox");
+    defer b.deinit();
+    try std.testing.expect(!b.dirty);
+    const n = try b.replaceAll("zebra", "X");
+    try std.testing.expectEqual(@as(usize, 0), n);
+    try std.testing.expectEqualStrings("the quick brown fox", b.contents);
+    try std.testing.expect(!b.dirty);
+}
+
+test "replaceAll: 1-hit identical to replaceFirst" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "hello WORLD");
+    defer b.deinit();
+    const n = try b.replaceAll("WORLD", "there");
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqualStrings("hello there", b.contents);
+    try std.testing.expect(b.dirty);
+}
+
+test "replaceAll: N hits walk forward without infinite loop" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "a-b-c-d-e");
+    defer b.deinit();
+    const n = try b.replaceAll("-", "+");
+    try std.testing.expectEqual(@as(usize, 4), n);
+    try std.testing.expectEqualStrings("a+b+c+d+e", b.contents);
+    try std.testing.expect(b.dirty);
+}
+
+test "replaceAll: empty replacement equals delete-all-occurrences" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "ab_cd_ef_gh");
+    defer b.deinit();
+    const n = try b.replaceAll("_", "");
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqualStrings("abcdefgh", b.contents);
+    try std.testing.expect(b.dirty);
+}
+
+test "replaceAll: replacement contains pattern does NOT loop forever" {
+    // The termination-critical case: pattern="a" replacement="aa".
+    // A naive cursor-stays-at-`at` implementation would match the
+    // first inserted "a" of "aa", replace it with "aa", and spin
+    // forever. The correct implementation advances cursor to `at +
+    // replacement.len`, so each original "a" is touched exactly once.
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "aXaXa");
+    defer b.deinit();
+    const n = try b.replaceAll("a", "aa");
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqualStrings("aaXaaXaa", b.contents);
+    try std.testing.expect(b.dirty);
+}
+
+test "replaceAll: longer-replacement growth across N hits" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "foo.bar.baz");
+    defer b.deinit();
+    const n = try b.replaceAll(".", " AND ");
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("foo AND bar AND baz", b.contents);
+}
+
+test "replaceAll: shorter-replacement shrinks across N hits" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "alphaXXXbetaXXXgamma");
+    defer b.deinit();
+    const n = try b.replaceAll("XXX", "-");
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("alpha-beta-gamma", b.contents);
+}
+
+test "replaceAll: overlapping pattern uses non-overlapping convention" {
+    // Same convention as findAll. "aaaa" with pattern "aa" replaced by
+    // "B" must yield "BB" (two replacements, not three or one).
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "aaaa");
+    defer b.deinit();
+    const n = try b.replaceAll("aa", "B");
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("BB", b.contents);
+}
+
+test "replaceAll: empty pattern returns error.EmptyPattern" {
+    const a = std.testing.allocator;
+    var b = try Buffer.fromBytes(a, .agent, "t", "abcdef");
+    defer b.deinit();
+    try std.testing.expectError(error.EmptyPattern, b.replaceAll("", "X"));
+    try std.testing.expectEqualStrings("abcdef", b.contents);
+    try std.testing.expect(!b.dirty);
+}
+
+test "property: 500-trial replaceAll matches std.mem.replaceOwned reference" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xA11_BEEF_F00D_2024);
+    const rand = prng.random();
+    var trial: usize = 0;
+    while (trial < 500) : (trial += 1) {
+        // Small alphabet so patterns actually hit.
+        const haystack_len = rand.intRangeAtMost(usize, 0, 128);
+        const haystack = try a.alloc(u8, haystack_len);
+        defer a.free(haystack);
+        for (haystack) |*c| c.* = rand.intRangeAtMost(u8, 'a', 'd');
+
+        const pat_len = rand.intRangeAtMost(usize, 1, 4);
+        const pattern = try a.alloc(u8, pat_len);
+        defer a.free(pattern);
+        for (pattern) |*c| c.* = rand.intRangeAtMost(u8, 'a', 'd');
+
+        // Replacement length 0-6. Use a disjoint alphabet so the
+        // replacement bytes can't themselves form a new pattern hit.
+        // std.mem.replaceOwned only does one pass, so to stay model-
+        // equivalent we must too. (replaceAll's cursor-walk discipline
+        // gives the same single-pass semantics; the disjoint alphabet
+        // just makes the model trivial to compute.)
+        const rep_len = rand.intRangeAtMost(usize, 0, 6);
+        const replacement = try a.alloc(u8, rep_len);
+        defer a.free(replacement);
+        for (replacement) |*c| c.* = rand.intRangeAtMost(u8, 'W', 'Z');
+
+        var b = try Buffer.fromBytes(a, .agent, "p", haystack);
+        defer b.deinit();
+        const count = try b.replaceAll(pattern, replacement);
+
+        // Reference: std.mem.replaceOwned (which uses the same non-
+        // overlapping left-anchored convention).
+        const expected = try std.mem.replaceOwned(u8, a, haystack, pattern, replacement);
+        defer a.free(expected);
+        const expected_count = std.mem.count(u8, haystack, pattern);
+
+        try std.testing.expectEqual(expected_count, count);
+        try std.testing.expectEqualSlices(u8, expected, b.contents);
+    }
+}
+
+test "property: findAll offsets are exactly the indexOf-walk reference (500 trials)" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xF1ED_A11_BABE_2024);
+    const rand = prng.random();
+    var trial: usize = 0;
+    while (trial < 500) : (trial += 1) {
+        const haystack_len = rand.intRangeAtMost(usize, 0, 128);
+        const haystack = try a.alloc(u8, haystack_len);
+        defer a.free(haystack);
+        for (haystack) |*c| c.* = rand.intRangeAtMost(u8, 'a', 'd');
+
+        const pat_len = rand.intRangeAtMost(usize, 1, 4);
+        const pattern = try a.alloc(u8, pat_len);
+        defer a.free(pattern);
+        for (pattern) |*c| c.* = rand.intRangeAtMost(u8, 'a', 'd');
+
+        var b = try Buffer.fromBytes(a, .agent, "p", haystack);
+        defer b.deinit();
+        const hits = try b.findAll(a, pattern);
+        defer a.free(hits);
+
+        // Reference: walk std.mem.indexOfPos forward, non-overlapping.
+        var expected: std.ArrayList(usize) = .empty;
+        defer expected.deinit(a);
+        var cursor: usize = 0;
+        while (cursor <= haystack.len) {
+            const found = std.mem.indexOfPos(u8, haystack, cursor, pattern) orelse break;
+            try expected.append(a, found);
+            cursor = found + pat_len;
+        }
+        try std.testing.expectEqualSlices(usize, expected.items, hits);
     }
 }
 

@@ -6,6 +6,100 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Bulk search-replace: `findAll` + `replaceAll` (2026-05-29)
+
+Closes the Wave-4 buffer-protocol gap. Wave-3 shipped
+`findFirst` / `findFrom` / `replaceFirst` as single-match primitives. A
+Janet-scripted bulk-rename refactor (the load-bearing motivating use
+case) had to walk the cursor itself, paying find cost per iteration and
+hand-handling the termination condition for "replacement contains
+pattern" (`(replace-all "a" "aa")`). The pure-Janet expression was
+correct but neither composable nor efficient.
+
+**New on `Buffer`:**
+
+- `findAll(allocator, pattern) ![]usize` returns all non-overlapping
+  match offsets, allocator-owned. Empty pattern returns
+  `error.EmptyPattern` (same disambiguation as `replaceFirst`).
+  Overlap convention is non-overlapping, left-anchored: `"aaaa"` with
+  pattern `"aa"` yields offsets `[0, 2]`, matching `std.mem` / `tr` /
+  `grep -o`.
+- `replaceAll(pattern, replacement) !usize` composes `findFrom` +
+  `deleteRange` + `insertAt` in a forward-walking loop. Returns the
+  count of replacements made. The cursor advances to
+  `at + replacement.len` after each insertion, so
+  `(replace-all "a" "aa")` terminates instead of spinning forever on
+  the just-inserted bytes. Empty pattern rejected as `EmptyPattern`.
+  Empty replacement is the natural "delete all occurrences"
+  composition.
+
+**New Janet bindings:**
+
+- `(buffer-find-all pattern)` returns a Janet array of integer
+  offsets; nil if no buffer is open; panics on empty pattern.
+- `(buffer-replace-all pattern replacement)` returns integer count of
+  replacements made; -1 if no buffer is open; panics on empty pattern.
+  Both bindings honor the same `JANET_STRING | JANET_BUFFER` positional
+  argument discipline as `(buffer-find)` / `(buffer-replace)`.
+
+**New M-x verbs:**
+
+- `M-x find-all <pattern>` prints `n offset(s): o1, o2, ...` or
+  `not-found`. Routed through both the REPL handler and the TUI
+  minibuffer handler. Audit-log payload:
+  `{event: "buffer-find-all", pattern_bytes, hit_count}`. Empty pattern
+  records an `mx-find-all-error` audit row.
+- `M-x replace-all <pattern> <replacement>` prints
+  `replaced N; buffer now M bytes, dirty` or `not-found`. Same
+  REPL+TUI wiring. Audit-log payload:
+  `{event: "buffer-replace-all", pattern_bytes, replacement_bytes,
+  replacement_count, new_size}`. Empty pattern records an
+  `mx-replace-all-error` row.
+
+**Tests (Buffer module: 52 to 70):**
+
+- `findAll`: 0 / 1 / N hits, overlapping pattern convention, empty
+  pattern rejected, single-byte across whole buffer.
+- `replaceAll`: 0-hit no-op (no dirty flip), 1-hit identical to
+  `replaceFirst`, N hits walk forward, empty-replacement delete-all,
+  replacement-contains-pattern termination (`a` to `aa`),
+  longer-replacement growth, shorter-replacement shrink, overlapping
+  convention, empty pattern rejected.
+- 500-trial property test: `replaceAll` matches `std.mem.replaceOwned`
+  byte-for-byte and count-for-count.
+- 500-trial property test: `findAll` matches the
+  `std.mem.indexOfPos` forward-walk reference offset-for-offset.
+
+**Audit-track:** `tools/cfunction-audit.sh` auto-picked up the 2 new
+cfunctions (now 22 total); 0 violations. Pre-registered via
+`stax-experiment` (`exp-1780087150-533614989`) with the falsifier
+"any test fails OR cfunction-audit reports violation OR doctest fails
+OR replaceAll loops forever on replacement-contains-pattern case".
+None triggered; verdict confirmed.
+
+**Deny-test thunk audit:** The sandbox deny-test and prop-removal
+thunks emit panic strings to stderr as a side effect of asserting
+`janet_dostring` returns non-zero. The Zig test wrapper inspects the
+return value, not stderr; `zig build test` exits 0. Surface noise was
+re-verified against the post-wave-4 thunk wiring; no semantic drift.
+
+### Search-replace primitive: `findFirst` + `findFrom` + `replaceFirst` (2026-05-29)
+
+Wave-3. Closes the v1.5 script-surface gap where a Janet script could
+edit any byte range but had no protocol-level way to ask "where is
+this pattern?" without reaching into `Buffer.contents` directly.
+
+- `findFirst(pattern) ?usize` returns first offset or `null`; empty
+  pattern returns `0` (matches `std.mem.indexOf` + `strstr(3)`).
+- `findFrom(pattern, start) ?usize` same but anchored at `start`,
+  clamped to `contents.len`.
+- `replaceFirst(pattern, replacement) !bool` composes `findFirst` +
+  `deleteRange` + `insertAt`. Empty pattern rejected as
+  `error.EmptyPattern`.
+
+Janet: `(buffer-find pattern)` / `(buffer-replace pattern replacement)`.
+M-x: `M-x find <pattern>` / `M-x replace <pattern> <replacement>`.
+
 ### Editing primitives: `insertAt` + `deleteRange` (2026-05-29)
 
 Closes a load-bearing buffer-protocol gap. Pre-this-commit, the buffer
