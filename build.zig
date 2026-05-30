@@ -74,6 +74,17 @@ pub fn build(b: *std.Build) void {
     const audit_tests = b.addTest(.{ .root_module = audit_test_mod });
     const run_audit_tests = b.addRunArtifact(audit_tests);
 
+    // zk.zig in-source tests (zettelkasten editor surface for codex + 0theta).
+    // Pure libc — no Janet runtime needed, same as audit.zig.
+    const zk_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/zk.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zk_test_mod.link_libc = true;
+    const zk_tests = b.addTest(.{ .root_module = zk_test_mod });
+    const run_zk_tests = b.addRunArtifact(zk_tests);
+
 
     // Tests need libc for the open/read/write/rename/unlink syscalls used by
     // Buffer.save/saveAs, so the test module mirrors the main exe's link
@@ -97,6 +108,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_buffer_tests.step);
     test_step.dependOn(&run_tui_tests.step);
     test_step.dependOn(&run_audit_tests.step);
+    test_step.dependOn(&run_zk_tests.step);
 
     // Sandbox tests — need the full Janet runtime linked in so the
     // gated wrappers can actually stand up a VM.

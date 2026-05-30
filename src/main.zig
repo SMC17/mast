@@ -21,6 +21,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const SessionAudit = @import("audit.zig").SessionAudit;
 const sandbox = @import("sandbox.zig");
 const tui = @import("tui.zig");
+const zk = @import("zk.zig");
 
 const janet = @import("janet_c.zig").c;
 
@@ -54,6 +55,12 @@ const print = std.debug.print;
 var g_buffers: std.ArrayList(Buffer) = .empty;
 var g_current_index: usize = 0;
 var g_audit: ?*SessionAudit = null;
+
+// Zettelkasten audit-log path override (set by --audit-path CLI flag). When
+// null, zk.resolveAuditPath falls back to $HOME/.mast-zk-audit.jsonl. Kept
+// as a module-global so the Janet C-callbacks (which can't take userdata)
+// can read it.
+var g_zk_audit_path: ?[]const u8 = null;
 
 fn currentBuffer() ?*Buffer {
     if (g_buffers.items.len == 0) return null;
@@ -1200,6 +1207,130 @@ fn cmd_buffer_switch(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet 
     return janet.janet_wrap_integer(-1);
 }
 
+// ─── Zettelkasten Janet bindings ───────────────────────────────────────
+//
+// `(zettelkasten-open root slug)` resolves the slug under `root` using
+// codex-tool's first-path-segment category rule and opens the resulting
+// file into a new :file buffer. Returns the new buffer index, or nil on
+// SlugNotFound (so Janet callers can branch).
+//
+// `(zettelkasten-batch-replace root pattern replacement)` walks every
+// `.md` under `root`, replaces, and emits one structural-edit JSONL row
+// per file touched. Returns the total replacement count across files.
+//
+// Both bindings route through src/zk.zig; the heavy lifting is unit-tested
+// independently of Janet. These wrappers exist only to translate Janet
+// argv into Zig slices and back.
+
+fn janetArgAsSlice(t: c_uint, arg: janet.Janet) ?[]const u8 {
+    if (t == janet.JANET_STRING) {
+        const sp = janet.janet_unwrap_string(arg);
+        const len: usize = @intCast(janet.janet_string_length(sp));
+        const ptr: [*c]const u8 = @ptrCast(sp);
+        return ptr[0..len];
+    }
+    if (t == janet.JANET_BUFFER) {
+        const jb = janet.janet_unwrap_buffer(arg);
+        if (jb == null) return null;
+        const len: usize = @intCast(jb.*.count);
+        const ptr: [*c]const u8 = @ptrCast(jb.*.data);
+        return ptr[0..len];
+    }
+    return null;
+}
+
+fn cmd_zk_open(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc != 2) {
+        janet.janet_panicf("zettelkasten-open: expected (root slug), got %d args", argc);
+    }
+    const root_slice = janetArgAsSlice(janet.janet_type(argv[0]), argv[0]) orelse {
+        janet.janet_panicf("zettelkasten-open: root must be string or buffer");
+    };
+    const slug_slice = janetArgAsSlice(janet.janet_type(argv[1]), argv[1]) orelse {
+        janet.janet_panicf("zettelkasten-open: slug must be string or buffer");
+    };
+    const allocator = std.heap.c_allocator;
+    const path = zk.resolveSlug(allocator, root_slice, slug_slice) catch |e| {
+        if (g_audit) |a| {
+            a.write("zk-open-miss", .{
+                .root = root_slice,
+                .slug = slug_slice,
+                .err = @errorName(e),
+            }) catch {};
+        }
+        return janet.janet_wrap_nil();
+    };
+    defer allocator.free(path);
+
+    const opened = Buffer.fromFile(allocator, path) catch |e| {
+        if (g_audit) |a| {
+            a.write("zk-open-error", .{ .path = path, .err = @errorName(e) }) catch {};
+        }
+        return janet.janet_wrap_nil();
+    };
+    const idx = addBuffer(allocator, opened) catch |e| {
+        if (g_audit) |a| {
+            a.write("zk-open-error", .{ .path = path, .err = @errorName(e) }) catch {};
+        }
+        return janet.janet_wrap_nil();
+    };
+    if (g_audit) |a| {
+        a.write("zk-open", .{
+            .root = root_slice,
+            .slug = slug_slice,
+            .path = path,
+            .index = idx,
+        }) catch {};
+    }
+    return janet.janet_wrap_integer(@intCast(idx));
+}
+
+fn cmd_zk_batch_replace(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc != 3) {
+        janet.janet_panicf(
+            "zettelkasten-batch-replace: expected (root pattern replacement), got %d args",
+            argc,
+        );
+    }
+    const root_slice = janetArgAsSlice(janet.janet_type(argv[0]), argv[0]) orelse {
+        janet.janet_panicf("zettelkasten-batch-replace: root must be string or buffer");
+    };
+    const pat_slice = janetArgAsSlice(janet.janet_type(argv[1]), argv[1]) orelse {
+        janet.janet_panicf("zettelkasten-batch-replace: pattern must be string or buffer");
+    };
+    const rep_slice = janetArgAsSlice(janet.janet_type(argv[2]), argv[2]) orelse {
+        janet.janet_panicf("zettelkasten-batch-replace: replacement must be string or buffer");
+    };
+    const allocator = std.heap.c_allocator;
+    var result = zk.batchReplaceAndAudit(
+        allocator,
+        root_slice,
+        pat_slice,
+        rep_slice,
+        g_zk_audit_path,
+    ) catch |e| {
+        janet.janet_panicf("zettelkasten-batch-replace: %s", @errorName(e).ptr);
+    };
+    defer result.deinit();
+    var total: usize = 0;
+    var touched_files: usize = 0;
+    for (result.rows) |r| {
+        total += r.count;
+        if (r.count > 0) touched_files += 1;
+    }
+    if (g_audit) |a| {
+        a.write("zk-batch-replace", .{
+            .root = root_slice,
+            .pattern_bytes = pat_slice.len,
+            .replacement_bytes = rep_slice.len,
+            .files_walked = result.rows.len,
+            .files_touched = touched_files,
+            .total_replacements = total,
+        }) catch {};
+    }
+    return janet.janet_wrap_integer(@intCast(total));
+}
+
 // ─── Built-in M-x commands ─────────────────────────────────────────────
 
 const BuiltinCmd = struct {
@@ -1233,6 +1364,8 @@ const BUILTINS = [_]BuiltinCmd{
     .{ .name = "stax-search", .janet_expr = "(stax-bash (string \"stax-search \" $1))", .description = "Run stax-search Q" },
     .{ .name = "stax-dashboard", .janet_expr = "(stax-bash \"stax-dashboard --top 8\")", .description = "Show fleet dashboard" },
     .{ .name = "stax-hunger", .janet_expr = "(stax-bash \"stax-hunger --human\")", .description = "Show lane lifecycle classification" },
+    .{ .name = "zk-open", .janet_expr = "MAST_ZK_OPEN_SENTINEL", .description = "Open zettelkasten slug: M-x zk-open <root> <slug>" },
+    .{ .name = "zk-batch-replace", .janet_expr = "MAST_ZK_BATCH_REPLACE_SENTINEL", .description = "Structural-edit walk: M-x zk-batch-replace <root> <pattern> <replacement>" },
 };
 
 const HELP_TEXT =
@@ -1261,6 +1394,10 @@ const HELP_TEXT =
     \\  M-x stax-search Q       Run stax-search Q (delegates to local CLI)
     \\  M-x stax-dashboard      Show stax fleet dashboard
     \\  M-x stax-hunger         Show per-lane lifecycle classification
+    \\  M-x zk-open <root> <slug>  Open codex/0theta slug under root
+    \\  M-x zk-batch-replace <root> <pattern> <replacement>
+    \\                          Structural edit across every .md under root;
+    \\                          emits one JSONL audit row per file walked
     \\  M-x exit                Quit
     \\  (anything else)         Evaluated as raw Janet
     \\
@@ -1750,6 +1887,90 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
                 }
                 continue;
             }
+            if (std.mem.eql(u8, b.janet_expr, "MAST_ZK_OPEN_SENTINEL")) {
+                if (parsed.args.len < 2) {
+                    print("  (usage: M-x zk-open <root> <slug>)\n\n", .{});
+                    try audit.write("mx-zk-open-error", .{ .err = "usage" });
+                    continue;
+                }
+                const root_arg = parsed.args[0];
+                const slug_arg = parsed.args[1];
+                const path = zk.resolveSlug(allocator, root_arg, slug_arg) catch |e| {
+                    print("  (zk-open: {s})\n\n", .{@errorName(e)});
+                    try audit.write("zk-open-miss", .{
+                        .root = root_arg,
+                        .slug = slug_arg,
+                        .err = @errorName(e),
+                    });
+                    continue;
+                };
+                defer allocator.free(path);
+                const opened = Buffer.fromFile(allocator, path) catch |e| {
+                    print("  (zk-open open failed: {s})\n\n", .{@errorName(e)});
+                    try audit.write("zk-open-error", .{ .path = path, .err = @errorName(e) });
+                    continue;
+                };
+                const zk_idx = addBuffer(allocator, opened) catch |e| {
+                    print("  (zk-open register failed: {s})\n\n", .{@errorName(e)});
+                    try audit.write("zk-open-error", .{ .path = path, .err = @errorName(e) });
+                    continue;
+                };
+                print("  → opened [{d}] {s}\n\n", .{ zk_idx, path });
+                try audit.write("zk-open", .{
+                    .root = root_arg,
+                    .slug = slug_arg,
+                    .path = path,
+                    .index = zk_idx,
+                });
+                continue;
+            }
+            if (std.mem.eql(u8, b.janet_expr, "MAST_ZK_BATCH_REPLACE_SENTINEL")) {
+                if (parsed.args.len < 3) {
+                    print("  (usage: M-x zk-batch-replace <root> <pattern> <replacement>)\n\n", .{});
+                    try audit.write("mx-zk-batch-replace-error", .{ .err = "usage" });
+                    continue;
+                }
+                const root_arg = parsed.args[0];
+                const pat_arg = parsed.args[1];
+                // Replacement may contain whitespace; join remaining tokens.
+                var rep_join: std.ArrayList(u8) = .empty;
+                defer rep_join.deinit(allocator);
+                for (parsed.args[2..], 0..) |arg, i_arg| {
+                    if (i_arg > 0) try rep_join.append(allocator, ' ');
+                    try rep_join.appendSlice(allocator, arg);
+                }
+                var result = zk.batchReplaceAndAudit(
+                    allocator,
+                    root_arg,
+                    pat_arg,
+                    rep_join.items,
+                    g_zk_audit_path,
+                ) catch |e| {
+                    print("  (zk-batch-replace: {s})\n\n", .{@errorName(e)});
+                    try audit.write("mx-zk-batch-replace-error", .{ .err = @errorName(e) });
+                    continue;
+                };
+                defer result.deinit();
+                var total: usize = 0;
+                var touched: usize = 0;
+                for (result.rows) |r| {
+                    total += r.count;
+                    if (r.count > 0) touched += 1;
+                }
+                print(
+                    "  → walked {d} file(s); {d} touched; {d} total replacement(s)\n\n",
+                    .{ result.rows.len, touched, total },
+                );
+                try audit.write("zk-batch-replace", .{
+                    .root = root_arg,
+                    .pattern_bytes = pat_arg.len,
+                    .replacement_bytes = rep_join.items.len,
+                    .files_walked = result.rows.len,
+                    .files_touched = touched,
+                    .total_replacements = total,
+                });
+                continue;
+            }
             if (std.mem.eql(u8, b.janet_expr, "MAST_SAVE_SENTINEL")) {
                 if (currentBuffer()) |buf| {
                     const n = buf.save() catch |e| {
@@ -1857,11 +2078,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
     _ = args_iter.next(); // skip argv[0]
 
     // CLI flags: --tui enters the windowed view after init.janet loads.
+    // --audit-path <p> routes the zk-batch-replace structural audit log to
+    // <p> instead of the default $HOME/.mast-zk-audit.jsonl. Operator-
+    // managed path; mast does not enforce a stax/state default for the zk
+    // audit because codex-tool / 0theta workflows may place it inside the
+    // zettelkasten root for repo-local provenance.
     var initial_file: ?[]const u8 = null;
     var tui_mode = false;
+    var audit_path_arg: ?[]u8 = null;
+    var pending_audit_path = false;
     while (args_iter.next()) |a| {
+        if (pending_audit_path) {
+            audit_path_arg = try allocator.dupe(u8, a);
+            pending_audit_path = false;
+            continue;
+        }
         if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
-            print("usage: mast [--tui] [file]\n\n", .{});
+            print("usage: mast [--tui] [--audit-path <path>] [file]\n\n", .{});
             print("{s}", .{HELP_TEXT});
             return;
         }
@@ -1873,11 +2106,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
             tui_mode = true;
             continue;
         }
+        if (std.mem.eql(u8, a, "--audit-path")) {
+            pending_audit_path = true;
+            continue;
+        }
         if (initial_file == null) {
             initial_file = try allocator.dupe(u8, a);
         }
     }
     defer if (initial_file) |p| allocator.free(p);
+    defer if (audit_path_arg) |p| allocator.free(p);
+    if (audit_path_arg) |p| g_zk_audit_path = p;
 
     if (janet.janet_init() != 0) {
         print("FAIL janet_init\n", .{});
@@ -1902,6 +2141,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     janet.janet_def(env, "buffer-find-all", janet.janet_wrap_cfunction(cmd_buffer_find_all), "(buffer-find-all pattern): array of every non-overlapping offset of pattern in current buffer. Empty pattern panics; nil if no buffer.");
     janet.janet_def(env, "buffer-replace", janet.janet_wrap_cfunction(cmd_buffer_replace), "(buffer-replace pattern replacement) — replace first occurrence; returns true on hit, nil on miss. Empty pattern panics.");
     janet.janet_def(env, "buffer-replace-all", janet.janet_wrap_cfunction(cmd_buffer_replace_all), "(buffer-replace-all pattern replacement): replace every non-overlapping occurrence; returns count int. Empty pattern panics; -1 if no buffer.");
+    janet.janet_def(env, "zettelkasten-open", janet.janet_wrap_cfunction(cmd_zk_open), "(zettelkasten-open root slug): resolve slug under root via first-path-segment category rule; open into a new :file buffer; return its index or nil.");
+    janet.janet_def(env, "zettelkasten-batch-replace", janet.janet_wrap_cfunction(cmd_zk_batch_replace), "(zettelkasten-batch-replace root pattern replacement): walk every .md under root, replaceAll, emit JSONL audit row per file. Returns total replacement count.");
     janet.janet_def(env, "agent/run", janet.janet_wrap_cfunction(cmd_agent_run), "(agent/run cmd) — spawn cmd, capture stdout into a new :agent buffer, return its index. Requires `exec`.");
     janet.janet_def(env, "agent/spawn", janet.janet_wrap_cfunction(cmd_agent_spawn), "(agent/spawn cmd) — non-blocking fork+exec; returns handle id. Buffer receives stdout via agent/poll. Requires `exec`.");
     janet.janet_def(env, "agent/poll", janet.janet_wrap_cfunction(cmd_agent_poll), "(agent/poll handle) — drain stdout into buffer; return exit status int if exited, nil otherwise.");
@@ -2409,6 +2650,81 @@ fn execute_mx_line(allocator: Allocator, env: *janet.JanetTable, audit: *Session
                 return;
             };
             try audit.write("buffer-create", .{ .name = parsed.args[0], .kind = "agent", .index = new_idx, .via = "tui" });
+            return;
+        }
+        if (std.mem.eql(u8, b.janet_expr, "MAST_ZK_OPEN_SENTINEL")) {
+            if (parsed.args.len < 2) {
+                try audit.write("mx-zk-open-error", .{ .err = "usage", .via = "tui" });
+                return;
+            }
+            const root_arg = parsed.args[0];
+            const slug_arg = parsed.args[1];
+            const path = zk.resolveSlug(allocator, root_arg, slug_arg) catch |e| {
+                try audit.write("zk-open-miss", .{
+                    .root = root_arg,
+                    .slug = slug_arg,
+                    .err = @errorName(e),
+                    .via = "tui",
+                });
+                return;
+            };
+            defer allocator.free(path);
+            const opened = Buffer.fromFile(allocator, path) catch |e| {
+                try audit.write("zk-open-error", .{ .path = path, .err = @errorName(e), .via = "tui" });
+                return;
+            };
+            const idx = addBuffer(allocator, opened) catch |e| {
+                try audit.write("zk-open-error", .{ .path = path, .err = @errorName(e), .via = "tui" });
+                return;
+            };
+            try audit.write("zk-open", .{
+                .root = root_arg,
+                .slug = slug_arg,
+                .path = path,
+                .index = idx,
+                .via = "tui",
+            });
+            return;
+        }
+        if (std.mem.eql(u8, b.janet_expr, "MAST_ZK_BATCH_REPLACE_SENTINEL")) {
+            if (parsed.args.len < 3) {
+                try audit.write("mx-zk-batch-replace-error", .{ .err = "usage", .via = "tui" });
+                return;
+            }
+            const root_arg = parsed.args[0];
+            const pat_arg = parsed.args[1];
+            var rep_join: std.ArrayList(u8) = .empty;
+            defer rep_join.deinit(allocator);
+            for (parsed.args[2..], 0..) |arg, i_arg| {
+                if (i_arg > 0) try rep_join.append(allocator, ' ');
+                try rep_join.appendSlice(allocator, arg);
+            }
+            var result = zk.batchReplaceAndAudit(
+                allocator,
+                root_arg,
+                pat_arg,
+                rep_join.items,
+                g_zk_audit_path,
+            ) catch |e| {
+                try audit.write("mx-zk-batch-replace-error", .{ .err = @errorName(e), .via = "tui" });
+                return;
+            };
+            defer result.deinit();
+            var total: usize = 0;
+            var touched: usize = 0;
+            for (result.rows) |r| {
+                total += r.count;
+                if (r.count > 0) touched += 1;
+            }
+            try audit.write("zk-batch-replace", .{
+                .root = root_arg,
+                .pattern_bytes = pat_arg.len,
+                .replacement_bytes = rep_join.items.len,
+                .files_walked = result.rows.len,
+                .files_touched = touched,
+                .total_replacements = total,
+                .via = "tui",
+            });
             return;
         }
         if (std.mem.startsWith(u8, b.janet_expr, "MAST_")) {
