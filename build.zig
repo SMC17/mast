@@ -85,6 +85,41 @@ pub fn build(b: *std.Build) void {
     const zk_tests = b.addTest(.{ .root_module = zk_test_mod });
     const run_zk_tests = b.addRunArtifact(zk_tests);
 
+    // skills.zig in-source tests (skill loader + frontmatter parser).
+    // Needs Janet linked because skills.zig imports sandbox.zig which
+    // imports janet_c.zig; the Capability enum is the only use but the
+    // transitive dependency pulls in the full amalgam.
+    const skills_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/skills.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    skills_test_mod.addCSourceFile(.{
+        .file = b.path("vendored/janet/janet.c"),
+        .flags = &.{ "-std=c99", "-fno-strict-aliasing", "-Wno-unused-parameter" },
+    });
+    skills_test_mod.addIncludePath(b.path("vendored/janet"));
+    skills_test_mod.link_libc = true;
+    skills_test_mod.linkSystemLibrary("m", .{});
+    if (t.os.tag == .linux) {
+        skills_test_mod.linkSystemLibrary("pthread", .{});
+        skills_test_mod.linkSystemLibrary("dl", .{});
+        skills_test_mod.linkSystemLibrary("rt", .{});
+    }
+    const skills_tests = b.addTest(.{ .root_module = skills_test_mod });
+    const run_skills_tests = b.addRunArtifact(skills_tests);
+
+    // plan.zig in-source tests (plan struct + compaction). Pure libc; no
+    // Janet runtime needed.
+    const plan_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/plan.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    plan_test_mod.link_libc = true;
+    const plan_tests = b.addTest(.{ .root_module = plan_test_mod });
+    const run_plan_tests = b.addRunArtifact(plan_tests);
+
 
     // Tests need libc for the open/read/write/rename/unlink syscalls used by
     // Buffer.save/saveAs, so the test module mirrors the main exe's link
@@ -104,11 +139,13 @@ pub fn build(b: *std.Build) void {
 
     const buffer_tests = b.addTest(.{ .root_module = test_mod });
     const run_buffer_tests = b.addRunArtifact(buffer_tests);
-    const test_step = b.step("test", "Run unit tests (buffer protocol + sandbox + tui + audit)");
+    const test_step = b.step("test", "Run unit tests (buffer protocol + sandbox + tui + audit + skills + plan)");
     test_step.dependOn(&run_buffer_tests.step);
     test_step.dependOn(&run_tui_tests.step);
     test_step.dependOn(&run_audit_tests.step);
     test_step.dependOn(&run_zk_tests.step);
+    test_step.dependOn(&run_skills_tests.step);
+    test_step.dependOn(&run_plan_tests.step);
 
     // Sandbox tests — need the full Janet runtime linked in so the
     // gated wrappers can actually stand up a VM.

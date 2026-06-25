@@ -23,6 +23,25 @@
 ##   (agent/count)           → integer
 ##   (agent/alive? handle)   → boolean
 ##   (agent/kill handle)     → boolean
+##
+## Skills (v1.5) — ~/.config/mast/skills/**/*.janet with frontmatter:
+##   # name: my-skill  # version: 0.1.0  # category: misc
+##   # description: ...  # requires: exec   (optional capability gate)
+##   (defn run [& args] ...)   ← entry point called on invocation
+##
+##   (skill/list)             → array of loaded skill name strings
+##   (skill/run name [args])  → eval skill source, call (run args...)
+##   (skill/reload)           → rescan skills dir, return count
+##
+## Plan (v1.5) — structured agent plan, single source of truth:
+##   (plan/propose desc [parent-id [verify [hints]]]) → task id integer
+##   (plan/status id "pending"|"in_progress"|"done"|"verified"|"blocked") → bool
+##   (plan/count)             → active (non-complete) task count
+##   (plan/compact)           → remove done+verified leaves, return count removed
+##
+## Adversarial verification (v1.5) — 4-stage stax-cross-agent-verification:
+##   (verify/run path)        → agent handle (async); requires exec
+##   (verify/buffer)          → verify current buffer contents; requires exec
 
 # ─── Section 1: simple utility verbs ───────────────────────────────────
 #
@@ -114,3 +133,46 @@
       "buffer:   " (buffer-info) "\n"
       "agents:   " (agent/count) " handles\n"
       "(M-x (fleet-dashboard) for cluster view; M-x (sandbox-audit-mini) for sandbox)")))
+
+# ─── Section 7: skills + plan (v1.5) ───────────────────────────────────
+#
+# These demonstrate the agentic primitives added in v1.5: a structured
+# plan as the agent's single source of truth, and invocable skills that
+# load from ~/.config/mast/skills/.
+
+# Plan a multi-step task and track it through to completion.
+(def plan-and-track
+  (fn [desc]
+    (let [id (plan/propose desc)]
+      (plan/status id "in_progress")
+      (string "task " id " started: " desc
+              " (M-x plan-status " id " done when complete)"))))
+
+# Compact the plan and report what was pruned.
+(def plan-gc
+  (fn []
+    (let [before (plan/count)
+          removed (plan/compact)
+          after (plan/count)]
+      (string "plan-gc: " removed " tasks compacted; "
+              before " → " after " active"))))
+
+# List loaded skills with their categories.
+(def skills-brief
+  (fn []
+    (let [names (skill/list)]
+      (if (= (length names) 0)
+        "no skills loaded (add *.janet files to ~/.config/mast/skills/)"
+        (string "skills (" (length names) "): "
+                (string/join names ", "))))))
+
+# Verify the current buffer through the 4-stage adversarial pipeline.
+# Returns immediately; the verification runs in an :agent buffer that
+# streams output. Use (agent/wait handle) to block until done.
+(def verify-now
+  (fn []
+    (let [handle (verify/buffer)]
+      (if (= handle -1)
+        "(no buffer open)"
+        (string "verification started; agent handle = " handle
+                " (poll with (agent/poll " handle "))")))))

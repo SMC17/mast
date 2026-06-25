@@ -4,6 +4,70 @@ All notable changes to `mast` will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] — 2026-06-25
+
+### Skills system (v1.5)
+
+`src/skills.zig` — skill loader for mast's agentic loop. Skills are `*.janet`
+files under `~/.config/mast/skills/` (depth-1 category subdirs) with a
+comment-header frontmatter block:
+
+```janet
+# name: my-skill
+# version: 0.1.0
+# category: verification
+# description: Run the Type-I overclaim audit
+# requires: exec
+
+(defn run [& args] ...)
+```
+
+The `requires:` field gates invocation against the existing sandbox capability
+model at zero extra cost. Three new Janet verbs: `(skill/list)`, `(skill/run
+name [args...])`, `(skill/reload)`. M-x equivalents: `skill-list`, `skill-run`,
+`skill-reload`. Ships with two example skills:
+`~/.config/mast/skills/verification/type1-audit.janet` (wires
+`stax-cross-agent-verification`) and
+`~/.config/mast/skills/plan/checkpoint.janet`.
+
+5 in-source tests (capability round-trip, frontmatter parsing, missing-name
+error, no-requires default, `Skills.find`).
+
+### Structured plan (v1.5)
+
+`src/plan.zig` — the Plan is the single source of truth for agent work.
+Requiring plan updates before file edits eliminates the contradictory-edit
+thrashing pattern observed in production agent logs.
+
+`TaskStatus` state machine: `pending → in_progress → done → verified` +
+`blocked`. `Plan.compact()` removes done+verified leaf tasks, keeping parents
+with active children in the active plan (critical for context injection).
+Append-only JSONL log at `~/.local/state/stax/plan-events.jsonl`.
+
+Four Janet verbs: `(plan/propose desc ...)`, `(plan/status id str)`,
+`(plan/count)`, `(plan/compact)`. M-x equivalents including multi-word
+description support. 6 in-source tests.
+
+### Adversarial verification (v1.5)
+
+`(verify/run path)` — runs the 4-stage `stax-cross-agent-verification`
+pipeline (Type-I attacker → Type-II attacker → arbiter → edit-applier) on any
+file path. Returns an agent handle; output streams to an `:agent` buffer.
+
+`(verify/buffer)` — dumps current buffer to a temp `.md` file and runs
+verification. M-x equivalent: `verify-buffer`.
+
+Both verbs are gated on `exec` capability. STAX_VERIFY_REPO env var overrides
+the pipeline location; default is `~/stax-cross-agent-verification/run.sh`.
+
+### Infrastructure
+
+- `g_janet_env` global for Janet C-callback → Janet eval bridge (enables
+  `skill/run` to eval skill source in the live session environment)
+- TUI sentinel dispatch for all new verbs (parallel with REPL dispatch)
+- `build.zig` test targets for `skills.zig` and `plan.zig`
+- `examples/init.janet` Section 7 documenting new v1.5 primitives
+
 ## [Unreleased]
 
 ### Bulk search-replace: `findAll` + `replaceAll` (2026-05-29)

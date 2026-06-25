@@ -1,7 +1,7 @@
 ---
-last_touched: 2026-05-22
-prior_touch: 2026-05-19
-current_test_count: 49
+last_touched: 2026-06-25
+prior_touch: 2026-05-22
+current_test_count: 64
 proof_level: audited
 posture: pre-1.0-in-semver-spirit
 upstream_zig_version: "0.16"

@@ -22,6 +22,8 @@ const SessionAudit = @import("audit.zig").SessionAudit;
 const sandbox = @import("sandbox.zig");
 const tui = @import("tui.zig");
 const zk = @import("zk.zig");
+const skills = @import("skills.zig");
+const plan = @import("plan.zig");
 
 const janet = @import("janet_c.zig").c;
 
@@ -61,6 +63,25 @@ var g_audit: ?*SessionAudit = null;
 // as a module-global so the Janet C-callbacks (which can't take userdata)
 // can read it.
 var g_zk_audit_path: ?[]const u8 = null;
+
+// ─── Skills registry (v1.5) ────────────────────────────────────────────
+//
+// Loaded once at startup from the skills directory; reachable by Janet
+// C-callbacks via module-global (same pattern as g_audit, g_agents, etc.).
+var g_skills: ?*skills.Skills = null;
+
+// Global Janet environment pointer — set in main() after janet_core_env().
+// Required by cmd_skill_run (and any other C-callback that needs to eval
+// Janet source after the startup phase).
+var g_janet_env: ?*janet.JanetTable = null;
+
+// ─── Plan (v1.5) ───────────────────────────────────────────────────────
+//
+// The structured plan is the single source of truth for in-progress agent
+// work. Agents update it before making file edits; the plan prevents the
+// contradictory-edit thrashing that appears in production agent logs.
+var g_plan: plan.Plan = undefined;
+var g_plan_init: bool = false;
 
 fn currentBuffer() ?*Buffer {
     if (g_buffers.items.len == 0) return null;
@@ -1331,6 +1352,559 @@ fn cmd_zk_batch_replace(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Jan
     return janet.janet_wrap_integer(@intCast(total));
 }
 
+// ─── Skills Janet C-functions (v1.5) ───────────────────────────────────
+
+/// `(skill/list)` — return an array of skill name strings.
+fn cmd_skill_list(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    const reg = g_skills orelse return janet.janet_wrap_nil();
+    const arr = janet.janet_array(@intCast(reg.items.len));
+    for (reg.items) |*s| {
+        const jstr = janet.janet_cstring(s.name.ptr);
+        janet.janet_array_push(arr, janet.janet_wrap_string(jstr));
+    }
+    return janet.janet_wrap_array(arr);
+}
+
+/// `(skill/run name [arg1 arg2 ...])` — eval the named skill's source in
+/// the current Janet env, then call its (run arg1 arg2 ...) function.
+/// Returns the skill's return value, or nil if the skill is not found.
+/// Capability gate: if the skill declares requires:, the capability must
+/// be granted in the current sandbox, otherwise panics with a clear message.
+fn cmd_skill_run(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc < 1) {
+        janet.janet_panicf("skill/run: expected at least 1 argument (name), got 0");
+    }
+    const t = janet.janet_type(argv[0]);
+    if (t != janet.JANET_STRING) {
+        janet.janet_panicf("skill/run: first argument must be skill name (string)");
+    }
+    const name_ptr = janet.janet_unwrap_string(argv[0]);
+    const name_len: usize = @intCast(janet.janet_string_length(name_ptr));
+    const name = @as([*c]const u8, @ptrCast(name_ptr))[0..name_len];
+
+    const reg = g_skills orelse {
+        janet.janet_panicf("skill/run: skill registry not initialized");
+    };
+    const skill = reg.find(name) orelse return janet.janet_wrap_nil();
+
+    // Capability check before eval
+    if (skill.required_cap) |cap| {
+        if (!sandbox.g_sandbox.has(cap)) {
+            janet.janet_panicf(
+                "skill/run: skill '%s' requires capability '%s' which is not granted",
+                name.ptr,
+                @tagName(cap).ptr,
+            );
+        }
+    }
+
+    // Eval the skill source (defines the (run ...) function in the env).
+    // g_janet_env is set in main() after janet_core_env(); C-callbacks
+    // can't receive the env pointer directly.
+    const jenv = g_janet_env orelse {
+        janet.janet_panicf("skill/run: Janet environment not ready");
+    };
+    // janet_dostring needs a null-terminated C string; skill.source is a
+    // []const u8 without a trailing null (stored as slice, not sentinel).
+    // dupeZ adds the null byte required by the C ABI.
+    const allocator = std.heap.c_allocator;
+    const c_src_z = allocator.dupeZ(u8, skill.source) catch {
+        janet.janet_panicf("skill/run: OOM null-terminating skill source");
+    };
+    defer allocator.free(c_src_z);
+    var load_out: janet.Janet = undefined;
+    const load_status = janet.janet_dostring(jenv, @ptrCast(c_src_z.ptr), "skill-load", &load_out);
+    if (load_status != 0) {
+        janet.janet_panicf("skill/run: error loading skill '%s'", name.ptr);
+    }
+
+    // Build Janet call: (run arg1 arg2 ...) where extra args come from argv[1..]
+    // Simplest safe approach: build a Janet expression string and eval it.
+    // Arguments past name are passed as quoted strings.
+    var call_expr: std.ArrayList(u8) = .empty;
+    // No defer past janet_panicf — explicit free at each panic site.
+    call_expr.appendSlice(allocator, "(run") catch {
+        call_expr.deinit(allocator);
+        janet.janet_panicf("skill/run: OOM building call expression");
+    };
+    var ai: i32 = 1;
+    while (ai < argc) : (ai += 1) {
+        const at = janet.janet_type(argv[@intCast(ai)]);
+        if (at == janet.JANET_STRING) {
+            const sp = janet.janet_unwrap_string(argv[@intCast(ai)]);
+            const slen: usize = @intCast(janet.janet_string_length(sp));
+            const sptr = @as([*c]const u8, @ptrCast(sp));
+            call_expr.append(allocator, ' ') catch {
+                call_expr.deinit(allocator);
+                janet.janet_panicf("skill/run: OOM building call expression");
+            };
+            call_expr.append(allocator, '"') catch {
+                call_expr.deinit(allocator);
+                janet.janet_panicf("skill/run: OOM building call expression");
+            };
+            call_expr.appendSlice(allocator, sptr[0..slen]) catch {
+                call_expr.deinit(allocator);
+                janet.janet_panicf("skill/run: OOM building call expression");
+            };
+            call_expr.append(allocator, '"') catch {
+                call_expr.deinit(allocator);
+                janet.janet_panicf("skill/run: OOM building call expression");
+            };
+        }
+    }
+    call_expr.append(allocator, ')') catch {
+        call_expr.deinit(allocator);
+        janet.janet_panicf("skill/run: OOM building call expression");
+    };
+
+    const c_call = allocator.dupeZ(u8, call_expr.items) catch {
+        call_expr.deinit(allocator);
+        janet.janet_panicf("skill/run: OOM building call expression (dupeZ)");
+    };
+    call_expr.deinit(allocator);
+    defer allocator.free(c_call);
+
+    if (g_audit) |a| {
+        a.write("skill-invoked", .{ .name = name }) catch {};
+    }
+
+    var out: janet.Janet = undefined;
+    const run_status = janet.janet_dostring(jenv, @ptrCast(c_call.ptr), "skill-run", &out);
+    if (run_status != 0) {
+        janet.janet_panicf("skill/run: error running skill '%s'", name.ptr);
+    }
+    return out;
+}
+
+/// `(skill/reload)` — rescan the skills directory and rebuild the registry.
+/// Returns the number of skills loaded.
+fn cmd_skill_reload(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    const allocator = std.heap.c_allocator;
+    if (g_skills) |old| old.deinit();
+    g_skills = skills.loadSkills(allocator) catch {
+        janet.janet_panicf("skill/reload: failed to load skills");
+    };
+    const count = g_skills.?.items.len;
+    if (g_audit) |a| {
+        a.write("skills-reloaded", .{ .count = count }) catch {};
+    }
+    return janet.janet_wrap_integer(@intCast(count));
+}
+
+// ─── Plan Janet C-functions (v1.5) ─────────────────────────────────────
+
+/// `(plan/propose description [parent_id [verification [file_hints]]])` —
+/// add a new task to the plan. Returns the task id (integer).
+fn cmd_plan_propose(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc < 1) {
+        janet.janet_panicf("plan/propose: expected at least 1 argument (description)");
+    }
+    const desc_slice = janetArgAsSlice(janet.janet_type(argv[0]), argv[0]) orelse {
+        janet.janet_panicf("plan/propose: description must be a string");
+    };
+    var parent_id: ?u64 = null;
+    if (argc >= 2) {
+        const pt = janet.janet_type(argv[1]);
+        if (pt == janet.JANET_NUMBER) {
+            const v = janet.janet_unwrap_integer(argv[1]);
+            if (v > 0) parent_id = @intCast(v);
+        }
+    }
+    const verification: []const u8 = if (argc >= 3) blk: {
+        break :blk janetArgAsSlice(janet.janet_type(argv[2]), argv[2]) orelse "";
+    } else "";
+    const file_hints: []const u8 = if (argc >= 4) blk: {
+        break :blk janetArgAsSlice(janet.janet_type(argv[3]), argv[3]) orelse "";
+    } else "";
+
+    if (!g_plan_init) return janet.janet_wrap_integer(-1);
+    const id = g_plan.addTask(desc_slice, parent_id, verification, file_hints) catch {
+        janet.janet_panicf("plan/propose: OOM adding task");
+    };
+    return janet.janet_wrap_integer(@intCast(id));
+}
+
+/// `(plan/status id "new-status")` — update a task's status.
+/// Returns true on success, false if id not found.
+fn cmd_plan_status(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (argc != 2) {
+        janet.janet_panicf("plan/status: expected (id status-string), got %d args", argc);
+    }
+    const id_val = unwrapIntArg(argv[0]) orelse return janet.janet_wrap_false();
+    if (id_val <= 0) return janet.janet_wrap_false();
+    const id: u64 = @intCast(id_val);
+
+    const status_slice = janetArgAsSlice(janet.janet_type(argv[1]), argv[1]) orelse {
+        janet.janet_panicf("plan/status: status must be a string");
+    };
+    const status = plan.TaskStatus.fromSlice(status_slice) orelse {
+        janet.janet_panicf(
+            "plan/status: unknown status '%s' (use pending/in_progress/done/verified/blocked)",
+            status_slice.ptr,
+        );
+    };
+
+    if (!g_plan_init) return janet.janet_wrap_false();
+    return if (g_plan.updateStatus(id, status)) janet.janet_wrap_true() else janet.janet_wrap_false();
+}
+
+/// `(plan/count)` — number of active (non-complete) tasks.
+fn cmd_plan_count(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    if (!g_plan_init) return janet.janet_wrap_integer(0);
+    return janet.janet_wrap_integer(@intCast(g_plan.countActive()));
+}
+
+/// `(plan/compact)` — collapse done+verified leaf tasks. Returns count removed.
+fn cmd_plan_compact(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    if (!g_plan_init) return janet.janet_wrap_integer(0);
+    const removed = g_plan.compact() catch return janet.janet_wrap_integer(0);
+    return janet.janet_wrap_integer(@intCast(removed));
+}
+
+// ─── Adversarial verification (v1.5) ───────────────────────────────────
+//
+// `(verify/run path)` — run the 4-stage adversarial verification pipeline
+// (stax-cross-agent-verification) on the file at `path`. Spawns async via
+// agent/spawn so the pipeline runs in an :agent buffer and streams output.
+// Returns the agent handle id, or -1 on error.
+//
+// Gate: requires `exec` capability (same as agent/spawn).
+// The VERIFY_REPO env var overrides the repo path; default searches $PATH
+// for stax-cross-agent-verification, then falls back to the sibling directory.
+
+fn cmd_verify_run(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    if (!sandbox.g_sandbox.has(.exec)) {
+        janet.janet_panicf("verify/run: denied — `exec` capability not granted (default-deny)");
+    }
+    if (argc < 1) {
+        janet.janet_panicf("verify/run: expected 1 argument (path to file)");
+    }
+    const path_slice = janetArgAsSlice(janet.janet_type(argv[0]), argv[0]) orelse {
+        janet.janet_panicf("verify/run: path must be a string");
+    };
+
+    // Resolve the verification repo. The run.sh script is the entry point.
+    // Search order: (1) $STAX_VERIFY_REPO, (2) sibling ~/stax-cross-agent-verification.
+    const allocator = std.heap.c_allocator;
+    var run_sh_buf: [512]u8 = undefined;
+    const run_sh = blk: {
+        const env_repo = libc.getenv("STAX_VERIFY_REPO");
+        if (env_repo != null) {
+            const s = std.mem.span(@as([*:0]const u8, @ptrCast(env_repo.?)));
+            break :blk std.fmt.bufPrint(&run_sh_buf, "{s}/run.sh", .{s}) catch {
+                janet.janet_panicf("verify/run: STAX_VERIFY_REPO path too long");
+            };
+        }
+        const env_home = libc.getenv("HOME");
+        if (env_home != null) {
+            const h = std.mem.span(@as([*:0]const u8, @ptrCast(env_home.?)));
+            break :blk std.fmt.bufPrint(&run_sh_buf, "{s}/stax-cross-agent-verification/run.sh", .{h}) catch {
+                janet.janet_panicf("verify/run: HOME path too long");
+            };
+        }
+        janet.janet_panicf("verify/run: cannot locate stax-cross-agent-verification (set STAX_VERIFY_REPO)");
+    };
+
+    // Build the command: bash <run_sh> <path>
+    var cmd_buf: [1024]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "bash {s} {s}", .{ run_sh, path_slice }) catch {
+        janet.janet_panicf("verify/run: command string too long");
+    };
+
+    if (g_audit) |a| {
+        a.write("verify-run", .{ .path = path_slice }) catch {};
+    }
+
+    // Delegate to cmd_agent_spawn so we get the same :agent buffer + handle
+    const c_cmd = allocator.dupeZ(u8, cmd) catch {
+        janet.janet_panicf("verify/run: OOM building command string");
+    };
+    defer allocator.free(c_cmd);
+
+    // Build a synthetic argv[0] for agent/spawn
+    var fake_argv = [1]janet.Janet{janet.janet_cstringv(c_cmd.ptr)};
+    return cmd_agent_spawn(1, &fake_argv);
+}
+
+/// `(verify/buffer)` — dump the current buffer to a temp file and run the
+/// verification pipeline on it. Returns agent handle, or -1 if no buffer is
+/// open. The temp file is written to /tmp with a session-scoped name.
+fn cmd_verify_buffer(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    if (!sandbox.g_sandbox.has(.exec)) {
+        janet.janet_panicf("verify/buffer: denied — `exec` capability not granted (default-deny)");
+    }
+
+    const buf = currentBuffer() orelse {
+        if (g_audit) |a| a.write("verify-buffer-error", .{ .err = "no-buffer" }) catch {};
+        return janet.janet_wrap_integer(-1);
+    };
+
+    // Write buffer contents to a temp .md file
+    const allocator = std.heap.c_allocator;
+    var tmp_path_buf: [256]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(
+        &tmp_path_buf,
+        "/tmp/mast-verify-{d}.md",
+        .{@as(u64, @intCast(libc.getpid()))},
+    ) catch return janet.janet_wrap_integer(-1);
+
+    var path_z: [256]u8 = undefined;
+    @memcpy(path_z[0..tmp_path.len], tmp_path);
+    path_z[tmp_path.len] = 0;
+    const fd = libc.open(
+        @ptrCast(&path_z),
+        libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC | libc.O_CLOEXEC,
+        @as(c_uint, 0o644),
+    );
+    if (fd < 0) {
+        if (g_audit) |a| a.write("verify-buffer-error", .{ .err = "tmpfile" }) catch {};
+        return janet.janet_wrap_integer(-1);
+    }
+    _ = libc.write(fd, buf.contents.ptr, buf.contents.len);
+    _ = libc.close(fd);
+
+    if (g_audit) |a| {
+        a.write("verify-buffer", .{ .bytes = buf.contents.len, .tmp = tmp_path }) catch {};
+    }
+
+    // Delegate to verify/run with the temp path
+    const path_janet_str = allocator.dupeZ(u8, tmp_path) catch return janet.janet_wrap_integer(-1);
+    defer allocator.free(path_janet_str);
+    var fake_argv = [1]janet.Janet{janet.janet_cstringv(path_janet_str.ptr)};
+    return cmd_verify_run(1, &fake_argv);
+}
+
+// ─── verifyRepoRoot — shared path resolution ───────────────────────────
+//
+// Resolves the stax-cross-agent-verification repo root. Writes into `buf`
+// and returns a slice of it, or null if neither env var nor HOME is set.
+// Used by cmd_verify_run (run.sh path) and cmd_verify_buffer_wait (proof path).
+fn verifyRepoRoot(buf: *[512]u8) ?[]const u8 {
+    const env_repo = libc.getenv("STAX_VERIFY_REPO");
+    if (env_repo != null) {
+        const s = std.mem.span(@as([*:0]const u8, @ptrCast(env_repo.?)));
+        return std.fmt.bufPrint(buf, "{s}", .{s}) catch return null;
+    }
+    const env_home = libc.getenv("HOME");
+    if (env_home != null) {
+        const h = std.mem.span(@as([*:0]const u8, @ptrCast(env_home.?)));
+        return std.fmt.bufPrint(buf, "{s}/stax-cross-agent-verification", .{h}) catch return null;
+    }
+    return null;
+}
+
+/// `(verify/buffer-wait)` — dump current buffer to temp file, run the
+/// 4-stage adversarial pipeline synchronously, then open the resulting
+/// `proofs/*.verified.md` file as a new :file buffer in the ring.
+///
+/// Returns the new buffer index (integer ≥ 0) on success.
+/// Returns -1 if no buffer is open or the temp file cannot be written.
+/// Returns the negative exit status (e.g. -1 for exit 1) if the pipeline
+/// fails.
+///
+/// Gate: requires `exec` capability. The pipeline can take several minutes
+/// (4 `claude -p` invocations + 1 retry each); the REPL blocks during this
+/// call. For non-blocking use, call `(verify/buffer)` instead and poll the
+/// returned handle.
+fn cmd_verify_buffer_wait(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    if (!sandbox.g_sandbox.has(.exec)) {
+        janet.janet_panicf("verify/buffer-wait: denied — `exec` capability not granted (default-deny)");
+    }
+
+    const buf = currentBuffer() orelse {
+        if (g_audit) |a| a.write("verify-buffer-wait-error", .{ .err = "no-buffer" }) catch {};
+        return janet.janet_wrap_integer(-1);
+    };
+
+    // Write buffer to temp file. Include PID so concurrent sessions
+    // don't clobber each other.
+    const pid_val: u64 = @intCast(libc.getpid());
+    var tmp_path_buf: [256]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(
+        &tmp_path_buf,
+        "/tmp/mast-verify-{d}.md",
+        .{pid_val},
+    ) catch return janet.janet_wrap_integer(-1);
+
+    var path_z: [256]u8 = undefined;
+    @memcpy(path_z[0..tmp_path.len], tmp_path);
+    path_z[tmp_path.len] = 0;
+    const fd = libc.open(
+        @ptrCast(&path_z),
+        libc.O_WRONLY | libc.O_CREAT | libc.O_TRUNC | libc.O_CLOEXEC,
+        @as(c_uint, 0o644),
+    );
+    if (fd < 0) {
+        if (g_audit) |a| a.write("verify-buffer-wait-error", .{ .err = "tmpfile" }) catch {};
+        return janet.janet_wrap_integer(-1);
+    }
+    _ = libc.write(fd, buf.contents.ptr, buf.contents.len);
+    _ = libc.close(fd);
+
+    // Resolve repo root to derive run.sh and proof path upfront.
+    var repo_root_buf: [512]u8 = undefined;
+    const repo_root = verifyRepoRoot(&repo_root_buf) orelse {
+        janet.janet_panicf("verify/buffer-wait: cannot locate verification repo (set STAX_VERIFY_REPO)");
+    };
+
+    // Proof output: <repo_root>/proofs/mast-verify-<pid>.verified.md
+    // This mirrors run.sh's `PROOFS_DIR/$ESSAY_BASE.verified.md` where
+    // ESSAY_BASE = "mast-verify-<pid>" (basename of temp file, strip .md).
+    var proof_path_buf: [768]u8 = undefined;
+    const proof_path = std.fmt.bufPrint(
+        &proof_path_buf,
+        "{s}/proofs/mast-verify-{d}.verified.md",
+        .{ repo_root, pid_val },
+    ) catch {
+        janet.janet_panicf("verify/buffer-wait: proof path too long");
+    };
+
+    // Build and run: bash <repo_root>/run.sh <tmp_path>
+    var run_sh_buf: [600]u8 = undefined;
+    const cmd = std.fmt.bufPrint(
+        &run_sh_buf,
+        "bash {s}/run.sh {s}",
+        .{ repo_root, tmp_path },
+    ) catch {
+        janet.janet_panicf("verify/buffer-wait: command string too long");
+    };
+
+    if (g_audit) |a| {
+        a.write("verify-buffer-wait", .{ .bytes = buf.contents.len, .tmp = tmp_path }) catch {};
+    }
+
+    // Spawn via the existing agent infrastructure then block. This reuses
+    // the :agent buffer creation + pid tracking we already have for free.
+    const allocator = std.heap.c_allocator;
+    const c_cmd = allocator.dupeZ(u8, cmd) catch {
+        janet.janet_panicf("verify/buffer-wait: OOM building command");
+    };
+    defer allocator.free(c_cmd);
+
+    var spawn_argv = [1]janet.Janet{janet.janet_cstringv(c_cmd.ptr)};
+    const handle_janet = cmd_agent_spawn(1, &spawn_argv);
+
+    // Unwrap handle id. cmd_agent_spawn returns an integer on success.
+    const handle_id = if (janet.janet_type(handle_janet) == janet.JANET_NUMBER)
+        janet.janet_unwrap_integer(handle_janet)
+    else
+        return janet.janet_wrap_integer(-1);
+
+    if (handle_id < 0) return janet.janet_wrap_integer(-1);
+
+    // Block: drain stdout into the :agent buffer until the child exits.
+    // Mirror cmd_agent_wait logic using the indexed handle.
+    const idx: usize = @intCast(handle_id);
+    if (idx >= g_agents.items.len) return janet.janet_wrap_integer(-1);
+    const h = &g_agents.items[idx];
+
+    // Poll stdout_fd until EOF, then waitpid.
+    var drain_buf: [4096]u8 = undefined;
+    while (true) {
+        const nr = libc.read(h.stdout_fd, &drain_buf, drain_buf.len);
+        if (nr <= 0) break;
+        // Append to the :agent buffer if still open.
+        if (!h.closed and h.buffer_idx < g_buffers.items.len) {
+            g_buffers.items[h.buffer_idx].append(drain_buf[0..@intCast(nr)]) catch {};
+        }
+    }
+    var wstatus: c_int = 0;
+    _ = libc.waitpid(@intCast(h.pid), &wstatus, 0);
+    _ = libc.close(h.stdout_fd);
+    // Manual WEXITSTATUS: (status >> 8) & 0xff — consistent with rest of codebase.
+    const exit_code: i32 = @intCast((wstatus >> 8) & 0xff);
+    h.closed = true;
+    h.exit_status = exit_code;
+
+    if (g_audit) |a| {
+        a.write("verify-buffer-wait-done", .{ .exit = exit_code, .proof = proof_path }) catch {};
+    }
+
+    if (exit_code != 0) {
+        return janet.janet_wrap_integer(-exit_code);
+    }
+
+    // Open the proof file as a new :file buffer.
+    const proof_buf = Buffer.fromFile(allocator, proof_path) catch {
+        // Pipeline exited 0 but proof file absent — partial failure.
+        if (g_audit) |a| a.write("verify-proof-open-error", .{ .path = proof_path }) catch {};
+        return janet.janet_wrap_integer(-2);
+    };
+    const proof_idx = addBuffer(allocator, proof_buf) catch {
+        if (g_audit) |a| a.write("verify-proof-open-error", .{ .path = proof_path }) catch {};
+        return janet.janet_wrap_integer(-3);
+    };
+    if (g_audit) |a| {
+        a.write("verify-proof-opened", .{ .path = proof_path, .index = proof_idx }) catch {};
+    }
+    return janet.janet_wrap_integer(@intCast(proof_idx));
+}
+
+// ─── Plan context serialization (v1.5) ─────────────────────────────────
+
+/// `(plan/context)` — serialize the current plan as a compact string
+/// suitable for injection into an LLM prompt.
+///
+/// Format (one line per task):
+///   plan (N active):
+///   [status] id: description
+///   ...
+///
+/// Shows all tasks (including done/verified) so the agent sees the full
+/// picture. Compact is what `plan/compact` does — call that first to
+/// prune finished work before injecting.
+fn cmd_plan_context(argc: i32, argv: [*c]janet.Janet) callconv(.c) janet.Janet {
+    _ = argc;
+    _ = argv;
+    if (!g_plan_init) return janet.janet_wrap_nil();
+
+    const allocator = std.heap.c_allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    // Header
+    var hdr: [64]u8 = undefined;
+    const hdr_line = std.fmt.bufPrint(&hdr, "plan ({d} active):\n", .{g_plan.countActive()}) catch
+        return janet.janet_wrap_nil();
+    out.appendSlice(allocator, hdr_line) catch return janet.janet_wrap_nil();
+
+    for (g_plan.tasks.items) |t| {
+        var line_buf: [1024]u8 = undefined;
+        const indent: []const u8 = if (t.parent_id != null) "  " else "";
+        const line = std.fmt.bufPrint(
+            &line_buf,
+            "{s}[{s}] {d}: {s}\n",
+            .{ indent, t.status.toSlice(), t.id, t.description },
+        ) catch continue;
+        out.appendSlice(allocator, line) catch break;
+        // Include verification hint if present
+        if (t.verification.len > 0) {
+            var vline: [256]u8 = undefined;
+            const vl = std.fmt.bufPrint(
+                &vline,
+                "{s}  verify: {s}\n",
+                .{ indent, t.verification },
+            ) catch continue;
+            out.appendSlice(allocator, vl) catch {};
+        }
+    }
+
+    const jstr = janet.janet_string(@ptrCast(out.items.ptr), @intCast(out.items.len));
+    return janet.janet_wrap_string(jstr);
+}
+
 // ─── Built-in M-x commands ─────────────────────────────────────────────
 
 const BuiltinCmd = struct {
@@ -1366,6 +1940,20 @@ const BUILTINS = [_]BuiltinCmd{
     .{ .name = "stax-hunger", .janet_expr = "(stax-bash \"stax-hunger --human\")", .description = "Show lane lifecycle classification" },
     .{ .name = "zk-open", .janet_expr = "MAST_ZK_OPEN_SENTINEL", .description = "Open zettelkasten slug: M-x zk-open <root> <slug>" },
     .{ .name = "zk-batch-replace", .janet_expr = "MAST_ZK_BATCH_REPLACE_SENTINEL", .description = "Structural-edit walk: M-x zk-batch-replace <root> <pattern> <replacement>" },
+    // Skills (v1.5)
+    .{ .name = "skill-list", .janet_expr = "(skill/list)", .description = "List loaded skills from ~/.config/mast/skills/" },
+    .{ .name = "skill-run", .janet_expr = "MAST_SKILL_RUN_SENTINEL", .description = "Run a skill: M-x skill-run <name> [args...]" },
+    .{ .name = "skill-reload", .janet_expr = "(skill/reload)", .description = "Rescan skills directory and reload registry" },
+    // Plan (v1.5)
+    .{ .name = "plan-propose", .janet_expr = "MAST_PLAN_PROPOSE_SENTINEL", .description = "Add a plan task: M-x plan-propose <description>" },
+    .{ .name = "plan-status", .janet_expr = "MAST_PLAN_STATUS_SENTINEL", .description = "Update task status: M-x plan-status <id> <status>" },
+    .{ .name = "plan-count", .janet_expr = "(plan/count)", .description = "Count active (non-complete) plan tasks" },
+    .{ .name = "plan-compact", .janet_expr = "(plan/compact)", .description = "Collapse done+verified leaf tasks from the plan" },
+    // Verification (v1.5)
+    .{ .name = "verify-buffer", .janet_expr = "(verify/buffer)", .description = "Run adversarial verification pipeline on current buffer (async; returns handle)" },
+    .{ .name = "verify-buffer-wait", .janet_expr = "(verify/buffer-wait)", .description = "Run adversarial verification synchronously; opens verified result as new buffer" },
+    .{ .name = "verify-file", .janet_expr = "MAST_VERIFY_FILE_SENTINEL", .description = "Run adversarial verification on a file: M-x verify-file <path>" },
+    .{ .name = "plan-context", .janet_expr = "(plan/context)", .description = "Print active plan as compact LLM-injectable context string" },
 };
 
 const HELP_TEXT =
@@ -1461,7 +2049,7 @@ fn parse_mx_line(allocator: Allocator, line: []const u8) !?ParsedMx {
 fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) !void {
     var line_buf: [4096]u8 = undefined;
 
-    print("mast v1.2.0 — single-binary editor kernel\n", .{});
+    print("mast v1.5.0 — single-binary editor kernel\n", .{});
     print("Type 'M-x help' or just 'help'. Ctrl-D to quit.\n\n", .{});
 
     var leftover_buf: [4096]u8 = undefined;
@@ -2027,6 +2615,120 @@ fn run_repl(allocator: Allocator, env: *janet.JanetTable, audit: *SessionAudit) 
                 }
                 continue;
             }
+            // skill-run <name> [args...]
+            if (std.mem.eql(u8, b.janet_expr, "MAST_SKILL_RUN_SENTINEL")) {
+                if (parsed.args.len == 0) {
+                    print("  (usage: M-x skill-run <name> [arg1 arg2 ...])\n\n", .{});
+                    try audit.write("mx-skill-run-error", .{ .err = "usage" });
+                    continue;
+                }
+                // Build (skill/run "name" "arg1" ...) expression
+                var expr_buf: std.ArrayList(u8) = .empty;
+                defer expr_buf.deinit(allocator);
+                expr_buf.appendSlice(allocator, "(skill/run \"") catch {
+                    print("  (OOM)\n\n", .{});
+                    continue;
+                };
+                expr_buf.appendSlice(allocator, parsed.args[0]) catch {};
+                expr_buf.append(allocator, '"') catch {};
+                for (parsed.args[1..]) |arg| {
+                    expr_buf.appendSlice(allocator, " \"") catch {};
+                    expr_buf.appendSlice(allocator, arg) catch {};
+                    expr_buf.append(allocator, '"') catch {};
+                }
+                expr_buf.append(allocator, ')') catch {};
+                const c_expr = allocator.dupeZ(u8, expr_buf.items) catch {
+                    print("  (OOM)\n\n", .{});
+                    continue;
+                };
+                defer allocator.free(c_expr);
+                var out: janet.Janet = undefined;
+                const st = janet.janet_dostring(env, @ptrCast(c_expr.ptr), "skill-run-repl", &out);
+                if (st != 0) {
+                    print("  (skill-run error)\n\n", .{});
+                    try audit.write("mx-skill-run-error", .{ .err = "eval" });
+                } else {
+                    print("  (skill-run: ok)\n\n", .{});
+                }
+                continue;
+            }
+            // plan-propose <description words...> — join all args as description
+            if (std.mem.eql(u8, b.janet_expr, "MAST_PLAN_PROPOSE_SENTINEL")) {
+                if (parsed.args.len == 0) {
+                    print("  (usage: M-x plan-propose <description>)\n\n", .{});
+                    continue;
+                }
+                // Join word-tokenized args back into a single description.
+                var desc_buf: std.ArrayList(u8) = .empty;
+                defer desc_buf.deinit(allocator);
+                for (parsed.args, 0..) |arg, ai| {
+                    if (ai > 0) desc_buf.append(allocator, ' ') catch {};
+                    desc_buf.appendSlice(allocator, arg) catch {};
+                }
+                const desc = desc_buf.items;
+                if (g_plan_init) {
+                    const id = g_plan.addTask(desc, null, "", "") catch {
+                        print("  (plan-propose: OOM)\n\n", .{});
+                        continue;
+                    };
+                    print("  → task {d}: {s}\n\n", .{ id, desc });
+                    try audit.write("plan-propose", .{ .id = id, .desc = desc });
+                } else {
+                    print("  (plan not initialized)\n\n", .{});
+                }
+                continue;
+            }
+            // plan-status <id> <status>
+            if (std.mem.eql(u8, b.janet_expr, "MAST_PLAN_STATUS_SENTINEL")) {
+                if (parsed.args.len < 2) {
+                    print("  (usage: M-x plan-status <id> <pending|in_progress|done|verified|blocked>)\n\n", .{});
+                    continue;
+                }
+                if (g_plan_init) {
+                    const id_val = std.fmt.parseInt(u64, parsed.args[0], 10) catch {
+                        print("  (plan-status: id must be a positive integer)\n\n", .{});
+                        continue;
+                    };
+                    const status = plan.TaskStatus.fromSlice(parsed.args[1]) orelse {
+                        print("  (plan-status: unknown status '{s}')\n\n", .{parsed.args[1]});
+                        continue;
+                    };
+                    if (g_plan.updateStatus(id_val, status)) {
+                        print("  → task {d} → {s}\n\n", .{ id_val, parsed.args[1] });
+                        try audit.write("plan-status", .{ .id = id_val, .status = parsed.args[1] });
+                    } else {
+                        print("  (plan-status: task {d} not found)\n\n", .{id_val});
+                    }
+                } else {
+                    print("  (plan not initialized)\n\n", .{});
+                }
+                continue;
+            }
+            // verify-file <path>
+            if (std.mem.eql(u8, b.janet_expr, "MAST_VERIFY_FILE_SENTINEL")) {
+                if (parsed.args.len == 0) {
+                    print("  (usage: M-x verify-file <path>)\n\n", .{});
+                    continue;
+                }
+                var expr_buf2: [1024]u8 = undefined;
+                const expr = std.fmt.bufPrint(
+                    &expr_buf2,
+                    "(verify/run \"{s}\")",
+                    .{parsed.args[0]},
+                ) catch {
+                    print("  (verify-file: path too long)\n\n", .{});
+                    continue;
+                };
+                const c_expr2 = allocator.dupeZ(u8, expr) catch {
+                    print("  (OOM)\n\n", .{});
+                    continue;
+                };
+                defer allocator.free(c_expr2);
+                var out2: janet.Janet = undefined;
+                _ = janet.janet_dostring(env, @ptrCast(c_expr2.ptr), "verify-file-repl", &out2);
+                print("  (verify/run started — poll agent handle for output)\n\n", .{});
+                continue;
+            }
         }
 
         const janet_src = if (found) |b|
@@ -2099,7 +2801,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return;
         }
         if (std.mem.eql(u8, a, "--version")) {
-            print("mast v1.2.0\n", .{});
+            print("mast v1.5.0\n", .{});
             return;
         }
         if (std.mem.eql(u8, a, "--tui")) {
@@ -2125,6 +2827,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer janet.janet_deinit();
 
     const env = janet.janet_core_env(null);
+    g_janet_env = env;
 
     janet.janet_def(env, "stax-pid", janet.janet_wrap_cfunction(cmd_stax_pid), "Host PID.");
     janet.janet_def(env, "stax-bash", janet.janet_wrap_cfunction(sandbox.gated_stax_bash), "Run a bash command; return exit status. Requires `exec` capability.");
@@ -2150,6 +2853,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
     janet.janet_def(env, "agent/count", janet.janet_wrap_cfunction(cmd_agent_count), "(agent/count) — number of registered agent handles.");
     janet.janet_def(env, "agent/alive?", janet.janet_wrap_cfunction(cmd_agent_alive), "(agent/alive? handle) — true if handle exists and is unclosed.");
     janet.janet_def(env, "agent/kill", janet.janet_wrap_cfunction(cmd_agent_kill), "(agent/kill handle) — SIGTERM the agent process; returns bool. Requires `exec`.");
+
+    // Skills (v1.5) — load once at startup; reachable by skill/* verbs.
+    janet.janet_def(env, "skill/list", janet.janet_wrap_cfunction(cmd_skill_list), "(skill/list) — array of loaded skill name strings.");
+    janet.janet_def(env, "skill/run", janet.janet_wrap_cfunction(cmd_skill_run), "(skill/run name [arg ...]) — eval skill source and call its (run ...). Requires the skill's declared capability.");
+    janet.janet_def(env, "skill/reload", janet.janet_wrap_cfunction(cmd_skill_reload), "(skill/reload) — rescan skills dir; returns count of loaded skills.");
+
+    // Plan (v1.5) — structured plan as single source of truth for agent work.
+    janet.janet_def(env, "plan/propose", janet.janet_wrap_cfunction(cmd_plan_propose), "(plan/propose desc [parent-id [verify [hints]]]) — add task; returns id.");
+    janet.janet_def(env, "plan/status", janet.janet_wrap_cfunction(cmd_plan_status), "(plan/status id status-str) — update task status; returns bool.");
+    janet.janet_def(env, "plan/count", janet.janet_wrap_cfunction(cmd_plan_count), "(plan/count) — number of active (non-complete) tasks.");
+    janet.janet_def(env, "plan/compact", janet.janet_wrap_cfunction(cmd_plan_compact), "(plan/compact) — collapse done+verified leaf tasks; returns count removed.");
+
+    // Adversarial verification (v1.5) — 4-stage stax-cross-agent-verification pipeline.
+    janet.janet_def(env, "verify/run", janet.janet_wrap_cfunction(cmd_verify_run), "(verify/run path) — run adversarial verification on file at path; returns agent handle. Requires `exec`.");
+    janet.janet_def(env, "verify/buffer", janet.janet_wrap_cfunction(cmd_verify_buffer), "(verify/buffer) — verify current buffer via adversarial pipeline; returns agent handle. Requires `exec`.");
+    janet.janet_def(env, "verify/buffer-wait", janet.janet_wrap_cfunction(cmd_verify_buffer_wait), "(verify/buffer-wait) — verify current buffer synchronously; opens proofs/*.verified.md as new :file buffer; returns buffer index. Requires `exec`.");
+    janet.janet_def(env, "plan/context", janet.janet_wrap_cfunction(cmd_plan_context), "(plan/context) — serialize active plan as compact string for LLM prompt injection.");
 
     // Install capability-gated wrappers over Janet's stdlib dangerous
     // bindings. The MECHANISM is default-deny at the binding boundary;
@@ -2257,6 +2977,41 @@ pub fn main(init: std.process.Init.Minimal) !void {
             else => print("init.janet load: {}\n", .{e}),
         }
     };
+
+    // Load skills registry (v1.5). Non-fatal: missing skills/ dir is normal.
+    g_skills = skills.loadSkills(allocator) catch null;
+    if (g_skills) |reg| {
+        audit.write("skills-loaded", .{ .count = reg.items.len }) catch {};
+    }
+
+    // Initialize plan (v1.5). Open plan-events JSONL alongside the session log.
+    g_plan = plan.Plan.init(allocator);
+    g_plan_init = true;
+    defer g_plan.deinit();
+    {
+        // Derive plan log path from session audit path if possible.
+        // Best-effort: failures leave g_plan.log_fd = -1 (in-memory only).
+        var plan_path_buf: [600]u8 = undefined;
+        const env_state_c = libc.getenv("XDG_STATE_HOME");
+        const env_home_c = libc.getenv("HOME");
+        const state_dir: []const u8 = if (env_state_c != null) blk: {
+            const s = std.mem.span(@as([*:0]const u8, @ptrCast(env_state_c.?)));
+            break :blk s;
+        } else if (env_home_c != null) blk: {
+            const h = std.mem.span(@as([*:0]const u8, @ptrCast(env_home_c.?)));
+            break :blk std.fmt.bufPrint(&plan_path_buf, "{s}/.local/state/stax", .{h}) catch "/tmp";
+        } else "/tmp";
+        var plan_file_buf: [512]u8 = undefined;
+        const plan_path = std.fmt.bufPrint(
+            &plan_file_buf,
+            "{s}/plan-events.jsonl",
+            .{state_dir},
+        ) catch "";
+        if (plan_path.len > 0) {
+            g_plan.openLog(plan_path) catch {};
+        }
+        audit.write("plan-initialized", .{}) catch {};
+    }
 
     if (tui_mode) {
         try run_tui(allocator, env.?, &audit);
@@ -2725,6 +3480,93 @@ fn execute_mx_line(allocator: Allocator, env: *janet.JanetTable, audit: *Session
                 .total_replacements = total,
                 .via = "tui",
             });
+            return;
+        }
+        // skill-run <name> [args...] — TUI path
+        if (std.mem.eql(u8, b.janet_expr, "MAST_SKILL_RUN_SENTINEL")) {
+            if (parsed.args.len == 0) {
+                try audit.write("mx-skill-run-error", .{ .err = "usage", .via = "tui" });
+                return;
+            }
+            var expr_buf: std.ArrayList(u8) = .empty;
+            defer expr_buf.deinit(allocator);
+            try expr_buf.appendSlice(allocator, "(skill/run \"");
+            try expr_buf.appendSlice(allocator, parsed.args[0]);
+            try expr_buf.append(allocator, '"');
+            for (parsed.args[1..]) |arg| {
+                try expr_buf.appendSlice(allocator, " \"");
+                try expr_buf.appendSlice(allocator, arg);
+                try expr_buf.append(allocator, '"');
+            }
+            try expr_buf.append(allocator, ')');
+            const c_expr = try allocator.dupeZ(u8, expr_buf.items);
+            defer allocator.free(c_expr);
+            var out: janet.Janet = undefined;
+            const st = janet.janet_dostring(env, @ptrCast(c_expr.ptr), "skill-run-tui", &out);
+            if (st != 0) {
+                try audit.write("mx-skill-run-error", .{ .err = "eval", .via = "tui" });
+            } else {
+                try audit.write("skill-invoked", .{ .name = parsed.args[0], .via = "tui" });
+            }
+            return;
+        }
+        // plan-propose <description words...> — TUI path
+        if (std.mem.eql(u8, b.janet_expr, "MAST_PLAN_PROPOSE_SENTINEL")) {
+            if (parsed.args.len == 0) {
+                try audit.write("mx-plan-propose-error", .{ .err = "usage", .via = "tui" });
+                return;
+            }
+            var desc_buf: std.ArrayList(u8) = .empty;
+            defer desc_buf.deinit(allocator);
+            for (parsed.args, 0..) |arg, ai| {
+                if (ai > 0) try desc_buf.append(allocator, ' ');
+                try desc_buf.appendSlice(allocator, arg);
+            }
+            if (g_plan_init) {
+                const id = g_plan.addTask(desc_buf.items, null, "", "") catch {
+                    try audit.write("mx-plan-propose-error", .{ .err = "oom", .via = "tui" });
+                    return;
+                };
+                try audit.write("plan-propose", .{ .id = id, .via = "tui" });
+            }
+            return;
+        }
+        // plan-status <id> <status> — TUI path
+        if (std.mem.eql(u8, b.janet_expr, "MAST_PLAN_STATUS_SENTINEL")) {
+            if (parsed.args.len < 2) {
+                try audit.write("mx-plan-status-error", .{ .err = "usage", .via = "tui" });
+                return;
+            }
+            if (g_plan_init) {
+                const id_val = std.fmt.parseInt(u64, parsed.args[0], 10) catch {
+                    try audit.write("mx-plan-status-error", .{ .err = "bad-id", .via = "tui" });
+                    return;
+                };
+                const status = plan.TaskStatus.fromSlice(parsed.args[1]) orelse {
+                    try audit.write("mx-plan-status-error", .{ .err = "bad-status", .via = "tui" });
+                    return;
+                };
+                const ok = g_plan.updateStatus(id_val, status);
+                try audit.write("plan-status", .{ .id = id_val, .ok = ok, .via = "tui" });
+            }
+            return;
+        }
+        // verify-file <path> — TUI path
+        if (std.mem.eql(u8, b.janet_expr, "MAST_VERIFY_FILE_SENTINEL")) {
+            if (parsed.args.len == 0) {
+                try audit.write("mx-verify-file-error", .{ .err = "usage", .via = "tui" });
+                return;
+            }
+            var vexpr: [1024]u8 = undefined;
+            const ve = std.fmt.bufPrint(&vexpr, "(verify/run \"{s}\")", .{parsed.args[0]}) catch {
+                try audit.write("mx-verify-file-error", .{ .err = "path-too-long", .via = "tui" });
+                return;
+            };
+            const c_ve = try allocator.dupeZ(u8, ve);
+            defer allocator.free(c_ve);
+            var vout: janet.Janet = undefined;
+            _ = janet.janet_dostring(env, @ptrCast(c_ve.ptr), "verify-file-tui", &vout);
+            try audit.write("verify-run", .{ .path = parsed.args[0], .via = "tui" });
             return;
         }
         if (std.mem.startsWith(u8, b.janet_expr, "MAST_")) {
