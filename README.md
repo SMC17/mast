@@ -13,7 +13,7 @@ The Emacs lesson — that any operation that touches the buffer should go throug
 
 ## Status — pre-1.0 substrate, hygiene milestone reached
 
-Despite the `v1.0.0` / `v1.1.0` / `v1.2.0` git tags, mast is pre-1.0
+Despite the `v1.0.0` → `v1.5.0` git tag progression, mast is pre-1.0
 in semver spirit. Two independent reasons:
 
 1. **Zig itself is on 0.16, not 1.0.** Until the language hits 1.0, no
@@ -43,12 +43,17 @@ What does work, green on Linux x86_64 + Apple Silicon arm64:
 | **Sandbox-deny audit routing** (v1.3.x) | done | `sandbox.g_deny_observer` fires BEFORE `janet_panicf`; main routes to `SessionAudit` as `sandbox-deny` records with category tag |
 | **Host-cfunction regression discipline** (v1.3.x) | done | `tools/cfunction-audit.sh` enumerates every `janet_def` registration and FAILS on dangerous syscalls without cap-check; wired into `zig build test` |
 | **README/code drift discipline** | done | `tools/doctest.sh` 25/25 PASS against shipped binary; covers build steps, multi-buffer lifecycle, agent sync+async cycles, --tui launch, G2 panic observability, strict-mode integration |
+| **Skill system** (v1.5.0) | unit-tested | `src/skills.zig` 5 tests; scans `~/.config/mast/skills/**/*.janet`, parses comment-header frontmatter, capability-gate check before eval; 64KB cap, O_CLOEXEC, silent on missing dir |
+| **Plan substrate** (v1.5.0) | unit-tested | `src/plan.zig` 6 tests; `TaskStatus` state machine (pending→in\_progress→done→verified+blocked); `Plan.compact()` removes done+verified leaf tasks; append-only JSONL event log |
+| **Adversarial verification loop** (v1.5.0) | posture-observable | `verify/run`, `verify/buffer`, `verify/buffer-wait`; wires `stax-cross-agent-verification` 4-stage pipeline; `verify/buffer-wait` blocks, then opens `proofs/*.verified.md` as a new `:file` buffer; gated on `exec` |
+| **`plan/context`** (v1.5.0) | posture-observable | compact plan serialization (`[status] id: description` per task); designed for LLM prompt injection; confirmed correct via `(print (plan/context))` smoke |
 
 **Gates still open before "production-grade" honestly fits:**
 
 - **G1 — Real Janet script under load.** Partially closed:
-  `~/.config/mast/init.janet` is 207 lines / 25 verbs and loads
-  cleanly. Soak time is the missing piece.
+  `~/.config/mast/init.janet` is 207+ lines / 25+ verbs (including v1.5
+  skill/plan/verify surface) and loads cleanly. Soak time is the
+  missing piece.
 - **G3 — Soak time.** ≥30 days of continuous use as the daily editor
   with audit log retained and reviewed for capability-deny anomalies.
   Not yet started.
@@ -59,11 +64,11 @@ What does work, green on Linux x86_64 + Apple Silicon arm64:
   strongest current substitute, not a replacement.
 - **G5 — Zig 1.0.** Out of this repo's control.
 
-Roadmap items (NOT in v1.3.x): local-inference daemon, native Windows,
-TUI damage tracker (full-redraw per keystroke today; adequate for
-small terminals), resource quotas on pathological Janet scripts
-(needs Janet fiber-level interrupt primitive not yet designed). See
-`CHANGELOG.md` for per-tag scope.
+Roadmap items still open: local-inference daemon, native Windows,
+TUI per-row damage tracking (frame-level shipped v1.3.2; row-level
+diff deferred to v0.4), `pidfd_open`/`kqueue` agent poll (current
+poll(2) backstop wakes every 500ms). See `CHANGELOG.md` for
+per-tag scope.
 
 ## Build
 
@@ -128,6 +133,69 @@ M-x (buffer-info)
 ```
 
 The eval happens before the REPL starts and any error is non-fatal — mast still drops you into the prompt and the audit log records the failure.
+
+## Agentic primitives (v1.5)
+
+Three interlocking systems shipped in v1.5.0. All require an `init.janet`
+that loads the surface (see `examples/init.janet` Section 7).
+
+### Skills — Janet plugins from disk
+
+Drop a `*.janet` file with a comment-header frontmatter block into
+`~/.config/mast/skills/<category>/`:
+
+```janet
+# name: type1-audit
+# version: 0.1.0
+# category: verification
+# description: Run 4-stage adversarial verification
+# requires: exec
+
+(defn run [& args]
+  (verify/run (first args)))
+```
+
+```
+M-x (skill/reload)                           # re-scan skills dir
+M-x (skill/list)                             # array of {name description}
+M-x (skill/run "type1-audit" "notes.md")     # invoke by name; requires: exec gate enforced
+```
+
+### Plan substrate — single source of truth for agent work
+
+```
+M-x (plan/propose "implement X" nil "zig build test" "src/x.zig")
+  → 1                                        # task id
+M-x (plan/propose "write tests" 1 "64 pass" "")
+  → 2                                        # child of task 1
+M-x (plan/status 1 "done")
+M-x (plan/compact)                           # removes done+verified leaf tasks
+  → 1                                        # tasks removed
+M-x (plan/context)                           # compact LLM-injectable string
+  → plan (1 active):
+    [pending] 2: write tests
+      verify: 64 pass
+```
+
+Tasks persist only for the session; the JSONL event log at
+`~/.local/state/stax/plan-events.jsonl` is append-only.
+
+### Adversarial verification loop
+
+Wires [`stax-cross-agent-verification`](https://github.com/SMC17/stax-cross-agent-verification)
+(4-stage adversarial pipeline) as a first-class mast tool. Requires the
+pipeline installed and the `exec` capability granted.
+
+```
+M-x (verify/run "path/to/claim.md")         # async; returns agent handle
+M-x (verify/buffer)                          # async verify of current buffer
+M-x (verify/buffer-wait)                     # blocking; opens proofs/*.verified.md as new :file buffer
+```
+
+`verify/buffer-wait` derives the proof output path from the pipeline's
+`$REPO_ROOT/proofs/<basename>.verified.md` convention before spawning,
+polls stdout until exit, then opens the result as a new buffer at the
+returned index.
 
 ## Empirical safety properties
 
@@ -245,14 +313,19 @@ Issues and discussion welcome. The substrate is small enough to be read end-to-e
    via `tui.FrameState` + `tui.emit_with_damage`.
 5. ~~`agent/kill handle` for in-session cancellation~~ — **shipped in
    v1.3.2** as `(agent/kill handle)` returning bool.
-6. v0.4 vaxis re-evaluation post-Zig-1.0 (the v1.3.0 TUI is in-house
+6. ~~Skills system, plan substrate, adversarial verification loop~~ —
+   **shipped in v1.5.0** (`skill/*`, `plan/*`, `verify/*`; 11 new verbs).
+7. v0.4 vaxis re-evaluation post-Zig-1.0 (the v1.3.0 TUI is in-house
    ANSI because the build doctrine is single-binary zero-Zig-deps; this
    may relax once Zig 1.0 stabilizes the dep ecosystem).
-7. TUI per-row damage tracking (v1.3.2 ships frame-level diff —
+8. TUI per-row damage tracking (v1.3.2 ships frame-level diff —
    "skip emit if frame identical." Row-level diff would only emit
    changed rows on large terminals; v0.4 work).
-8. Real `poll(2)` on both stdout_fd AND the child (`pidfd_open` on Linux,
+9. Real `poll(2)` on both stdout_fd AND the child (`pidfd_open` on Linux,
    `kqueue` on macOS) — v1.3.0 uses `poll(2)` on stdout_fd with a
    500ms backstop waitpid, which is fine for handfuls of agents but
    wakes the loop every 500ms even when nothing is happening.
+10. Skill persistence across sessions — the plan JSONL log persists; the
+    in-memory `Tasks` list does not. A `plan/restore` verb that replays
+    the log on startup would close the session-boundary gap.
 
