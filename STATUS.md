@@ -1,13 +1,32 @@
 ---
-last_touched: 2026-05-22
-prior_touch: 2026-05-19
-current_test_count: 49
-proof_level: audited
+last_touched: 2026-08-20
+prior_touch: 2026-06-25
+current_test_count: 180
+proof_level: unit-tested
 posture: pre-1.0-in-semver-spirit
 upstream_zig_version: "0.16"
 ---
 
 # mast status
+
+Proof vocabulary (harness): `sketch`, `scaffold`, `compiled`,
+`unit-tested`, `integration-tested`, `audited`, `benchmarked`,
+`hardware-verified`. Rows below use those words only. Local synonym
+`posture-observable-end-to-end` maps to `integration-tested`.
+`tooled` is not a proof level; static scanners are `audited` (static)
+when they ran.
+
+Repo-level proof on 2026-08-20 (Linux x86_64, Zig 0.16.0):
+`zig build test --summary all` → **180/180 tests passed**.
+`zig build doctest` → **25/25 PASS**. That is `unit-tested` +
+`integration-tested`. It is not G3 soak and not G4 independent review.
+Frontmatter `proof_level: unit-tested` is the strongest *repo-wide*
+word that this run supports. Sandbox rows may still say `audited`
+(self-applied).
+
+`current_test_count: 180` is the Zig runner total from `--summary all`
+(includes in-source tests reached through imports; some modules
+re-execute others). Previously claimed 64 — that was drift.
 
 ## Honest version posture
 
@@ -32,32 +51,38 @@ The hygiene work is real. The v1.x git tags will be honored for
 changelog continuity. But every reader should treat this as a pre-1.0
 substrate until both gates above close.
 
+No user count is claimed. G3 is the soak gate; it is open.
+
 ## Proof-vocabulary index
 
 | component                                | proof level                                       | evidence                                                                                                                                                       |
 |------------------------------------------|---------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Sandbox capability model (`os/shell` + `stax-bash` gated; **65** dangerous bindings removed as of v1.3.4) | `audited` + `unit-tested`                          | `docs/SANDBOX_THREAT_MODEL.md` is the self-applied audit + 2 rounds of self-applied adversarial review; `src/sandbox.zig` ships 12 in-source tests covering deny + grant + argc-bounds + ASCII-CI compare + every removed-binding panics from Janet (drift-proof against the static **65-entry** `REMOVED_BINDINGS` list) + deny-observer fires for every category + 3 property tests (grant idempotency, revokeAll invariant, panic-invariance under random cap sets) |
-| Sandbox mechanism — capability check     | `audited` (mutation-proven)                       | `tools/mutation-test.sh` M01 — the `g_sandbox.has(.exec)` sense flip — is KILLED; the load-bearing security check is mutation-resistant                       |
+| Sandbox capability model (`os/shell` + `stax-bash` gated; **73** dangerous bindings removed) | `audited` (self-applied) + `unit-tested`          | `docs/SANDBOX_THREAT_MODEL.md` is the self-applied audit + self-applied adversarial-review rounds under `research/`; `src/sandbox.zig` ships 12 in-source tests covering deny + grant + argc-bounds + ASCII-CI compare + every removed-binding panics from Janet (drift-proof against the static **73-entry** `REMOVED_BINDINGS` list) + deny-observer fires for every category + 3 property tests. Independent review is G4, open. Historical v1.3.4 snapshot was 65 entries; current source is 73. |
+| Sandbox mechanism — capability check     | `audited` (mutation-tested, self-applied)         | `tools/mutation-test.sh` M01 — the `g_sandbox.has(.exec)` sense flip — last recorded as KILLED. Not re-run 2026-08-20.                                         |
 | Sandbox-deny audit routing               | `unit-tested`                                     | `sandbox.g_deny_observer` callback fires BEFORE `janet_panicf`; `main.zig::onSandboxDeny` routes events to `SessionAudit` as `sandbox-deny` records with category tag (closes threat-model §6 residual #9) |
-| Host-cfunction regression discipline     | `audited` + `tooled`                              | `tools/cfunction-audit.sh` enumerates every `janet_def`-registered cfunction and FAILS if any touches `libc.system`/`popen`/`exec`/`fork` without a capability check; wired into `zig build test` (closes residual #10); current scan: 15 cfunctions, 3 gated, 12 benign, 0 violations |
-| `MAST_SANDBOX_STRICT` env var            | `posture-observable-end-to-end`                   | `tests/strict_mode_integration.sh` 5/5 cases against the built binary; one in-source env-parser test (`strictModeFromEnv`); README §Security/Sandbox documents |
-| Buffer protocol (`fromBytes` / `append` / `setContents`) | `unit-tested`                                     | 6 in-source tests in `src/buffer.zig` covering round-trip + dirty-flag + saveAs kind-conversion + partial-EOF mock + 6 property tests (5000 + 1000 + 1000 + 2000 + 200 + 100 trials)            |
-| File-write / atomic save                 | `unit-tested`                                     | atomic-save unit test in `src/buffer.zig` (tmp + fsync + rename); CI save-round-trip smoke (Linux x86_64 + macOS arm64)                                         |
-| Multi-buffer ring                        | `posture-observable-end-to-end`                   | `tools/doctest.sh` verifies empty-ring → new-buffer alpha → new-buffer beta → list-buffers reports "buffers (2)" → switch-buffer 0 → buffer-name = alpha → next-buffer → buffer-name = beta cycle |
-| Agent-as-buffer (sync `agent/run`)       | `posture-observable-end-to-end`                   | `tools/doctest.sh` verifies `(agent/run "echo …")` returns new buffer index AND captures cmd stdout into a `:agent` buffer renderable via `M-x display`        |
-| Agent-as-buffer (async `agent/spawn` + live-tail) | `posture-observable-end-to-end`            | `tools/doctest.sh` verifies `(agent/spawn cmd)` → handle int, `(agent/wait h)` → exit-status int, `(agent/alive? h)` → false after exit, captured stdout reaches the `:agent` buffer; `agent/wait` uses `poll(2)` on stdout_fd with 500ms backstop (closes §6 residual #8) |
-| Agent-as-buffer (in-session cancel)      | `unit-tested` (smoke)                             | `(agent/kill handle)` returns bool, sends SIGTERM (v1.3.2); audited as `agent-kill` event; gated on `exec`; smoke-tested: spawn `sleep 30` + kill + wait completes in <1s instead of 30s |
-| ANSI/termios TUI (`--tui`)               | `posture-observable-end-to-end`                   | `tools/doctest.sh` verifies `mast --tui <file>` exits 0 on 'q' AND emits the alt-screen-enter ANSI escape (1049h); in-source compile-check test in `src/tui.zig` |
-| TUI damage tracker (frame-level)         | `unit-tested`                                     | `tui.FrameState` + `tui.emit_with_damage` diff against previous frame and skip write when unchanged; `tui.invalidate(state)` forces full redraw; v1.3.2 two in-source tests (render determinism + diff/invalidate cycle); closes v1.3.0 §honest-residuals "TUI is full-redraw per keystroke" in the common case |
-| TUI damage tracker (per-row)             | `unit-tested`                                     | `tui.diff_rows(state, allocator, current, out_changed)` splits frame on "\\r\\n", returns indices of changed rows; pure (no stdout side-effect); v1.3.3 three in-source tests (first-call-all-changed, single-row-mutation, invalidate-forces-all) |
-| Sandbox property tests                   | `audited` (property-tested)                       | `src/sandbox.zig` v1.3.3 — grant idempotency (5000 trials), revokeAll invariant (1000 trials), REMOVED_BINDINGS panic-invariance under 200 random cap sets × 9 probe symbols (1800 Janet invocations); catches any future regression that routes a removed binding through a cap check |
-| Adversarial-review-driven closures (v1.3.4) | `audited` (self-applied hostile-reviewer) + `unit-tested` | A self-applied hostile-review pass against the post-v1.3.3 threat model found 7 net-new gaps: file/* + os/open bypass, FFI surface live, audit JSON injection, TUI ANSI injection, process-control survivors, bytecode constructors, agent/wait DoS. v1.3.4 closes findings #1, #2, #5, #6, #7 mechanically + finds #3 (audit JSONString escape) + #4 (TUI sanitize_into) with in-source tests for each. REMOVED_BINDINGS grows 31 → 65 entries. |
-| Resource quota (wall-clock) (v1.3.5)     | `posture-observable-end-to-end`                   | SIGALRM handler + `janet_interpreter_interrupt(janet_local_vm())`; `janet_dostring_quota` wraps every eval call site; `MAST_EVAL_TIMEOUT_SEC` env var (default 30s, cap 3600s). Smoke-tested live: `(while true 1)` with 3s budget interrupts cleanly + editor recovers. Closes threat-model §6 #8 wall-clock dimension. Memory + fd quota extend the same primitive (deferred to v0.4). |
-| Audit-log JSON escape (anti-injection)   | `unit-tested`                                     | `src/audit.zig::writeJsonString` escapes `"`/`\\`/`\\u00XX` per RFC 8259; 4 in-source tests cover trivial ASCII round-trip, quote/backslash/newline escape, control-byte escape, and the published adversarial PoC neutralization (closes finding #3) |
-| TUI ANSI-escape sanitization             | `unit-tested`                                     | `src/tui.zig::sanitize_into` replaces ESC/BEL/DEL/other C0 control bytes (except `\\t`/`\\n`/`\\r`) with `?` in render path for buf.name + buf.contents; 3 in-source tests cover OSC 52 clipboard-hijack PoC, UTF-8 passthrough, DEL handling (closes finding #4) |
-| README/code drift                        | `unit-tested`                                     | `tools/doctest.sh` 25/25 PASS against the shipped binary, including the 5/5 `MAST_SANDBOX_STRICT` integration cases it delegates to, the multi-buffer lifecycle, agent/run + agent/spawn cycles, --tui launch, and G2 panic observability |
-| Mutation surface                         | `audited`                                         | `tools/mutation-test.sh` 8/10 killed; 2 survivors classified honestly as equivalent mutants (M08 fd-zero, M10 mark-clamp no-op); no new survivors emerged from the v1.3.x sandbox extensions |
-| Cross-platform build                     | `compiled` (CI only)                              | CI matrix on Linux x86_64 + macOS arm64 with Zig 0.16.0                                                                                                        |
+| Host-cfunction regression discipline     | `audited` (static)                                | `tools/cfunction-audit.sh` enumerates every `janet_def`-registered cfunction and FAILS if any touches `libc.system`/`popen`/`exec`/`fork` without a capability check; wired into `zig build test`. 2026-08-20 scan: 35 cfunctions, 2 gated, 33 benign, 0 violations. |
+| `MAST_SANDBOX_STRICT` env var            | `integration-tested`                              | `tests/strict_mode_integration.sh` 5/5 cases against the built binary (ran inside `zig build test` 2026-08-20); one in-source env-parser test |
+| Buffer protocol (`fromBytes` / `append` / `setContents` + search/replace) | `unit-tested`                        | in-source tests in `src/buffer.zig` (61 tests in that file; property trials included as unit tests, not a separate proof level) |
+| File-write / atomic save                 | `unit-tested`                                     | atomic-save unit test in `src/buffer.zig` (tmp + fsync + rename)                                                                                               |
+| Multi-buffer ring                        | `integration-tested`                              | `tools/doctest.sh` verifies empty-ring → new-buffer alpha → new-buffer beta → list-buffers reports "buffers (2)" → switch-buffer 0 → buffer-name = alpha → next-buffer → buffer-name = beta cycle (25/25 PASS 2026-08-20) |
+| Agent-as-buffer (sync `agent/run`)       | `integration-tested`                              | `tools/doctest.sh` verifies `(agent/run "echo …")` returns new buffer index AND captures cmd stdout into a `:agent` buffer |
+| Agent-as-buffer (async `agent/spawn` + live-tail) | `integration-tested`                     | `tools/doctest.sh` verifies `(agent/spawn cmd)` → handle int, `(agent/wait h)` → exit-status int, `(agent/alive? h)` → false after exit; `agent/wait` uses `poll(2)` on stdout_fd with 500ms backstop |
+| Agent-as-buffer (in-session cancel)      | `unit-tested` (smoke)                             | `(agent/kill handle)` returns bool, sends SIGTERM (v1.3.2); gated on `exec`; not re-soaked 2026-08-20 |
+| ANSI/termios TUI (`--tui`)               | `integration-tested`                              | `tools/doctest.sh` verifies `mast --tui <file>` exits 0 on 'q' AND emits the alt-screen-enter ANSI escape (1049h) |
+| TUI damage tracker (frame-level)         | `unit-tested`                                     | `tui.FrameState` + `tui.emit_with_damage`; in-source tests in `src/tui.zig` |
+| TUI damage tracker (per-row)             | `unit-tested`                                     | `tui.diff_rows`; in-source tests in `src/tui.zig` |
+| Sandbox property tests                   | `unit-tested`                                     | `src/sandbox.zig` — grant idempotency (5000 trials), revokeAll invariant (1000 trials), REMOVED_BINDINGS panic-invariance under 200 random cap sets × probe symbols. Property tests are unit tests, not an external audit. |
+| Adversarial-review-driven closures (v1.3.4+) | `audited` (self-applied) + `unit-tested`      | Self-applied hostile-review rounds under `research/` found and closed named gaps (fs bypass, FFI, JSON injection, ANSI injection, process-control, bytecode, threading). REMOVED_BINDINGS grew 31 → 65 (v1.3.4) → **73** (current). Not G4. |
+| Resource quota (wall-clock) (v1.3.5)     | `integration-tested`                              | `tests/quota_integration.sh` **8/8** against the shipped binary (ran inside `zig build test` 2026-08-20). Memory + fd quota still deferred. |
+| Audit-log JSON escape (anti-injection)   | `unit-tested`                                     | `src/audit.zig::writeJsonString`; 4 in-source tests |
+| TUI ANSI-escape sanitization             | `unit-tested`                                     | `src/tui.zig::sanitize_into`; in-source tests |
+| Skills (`src/skills.zig`)                | `unit-tested`                                     | 5 in-source tests |
+| Plan (`src/plan.zig`)                    | `unit-tested`                                     | 7 in-source tests |
+| README/code drift                        | `integration-tested`                              | `zig build doctest` → `tools/doctest.sh` **25/25 PASS** 2026-08-20. (Older README text said 12/12; that was stale.) |
+| Mutation surface                         | `audited` (self-applied; not re-run this session) | `tools/mutation-test.sh` last recorded 8/10 killed; 2 survivors classified as equivalent mutants (M08 fd-zero, M10 mark-clamp no-op) |
+| Sandbox fuzz (round-3 harness)           | `integration-tested`                              | `tools/sandbox-fuzz.sh` PASS inside `zig build test` 2026-08-20 ("no dangerous cfunction returned a value from default-deny env") |
+| Cross-platform build                     | `compiled` (CI when green)                        | CI matrix on Linux x86_64 + macOS arm64 with Zig 0.16.0. This session measured Linux only. |
+| Fleet preflight                          | `scaffold`                                        | `tools/fleet-preflight` exists. Not real PR blocking and not real fleet review. |
 
 ## Gates that would justify a stronger claim
 
@@ -65,15 +90,11 @@ substrate until both gates above close.
   config (≥ a few hundred lines) loaded by mast and exercised over
   a meaningful session, ideally driving the editor through buffer
   mutation + file saves + sandbox-gated calls. Status: `PARTIALLY
-  CLOSED 2026-05-19`. `~/.config/mast/init.janet` is 207 lines / 25
-  user-script verbs across 7 sections (utility / experiment register
-  / buffer introspection / sandbox-posture probes / fleet workflows
-  / codex / morning-brief), loads cleanly on startup, and the
-  `sandbox-audit` verb returns 8/8 "G2 OK" lines confirming every
-  REMOVED_BINDINGS panic is observable end-to-end from user-script
-  context (not just from in-source Zig tests). Soak time (G3)
-  remains the missing G1 component — "loaded once" is not "exercised
-  over a meaningful session."
+  CLOSED`. Public evidence: in-tree `examples/init.janet` (178 lines)
+  loads on startup (`doctest` PASS 2026-08-20). Operator home-config
+  line counts are not a repo receipt. Soak time (G3) remains the
+  missing G1 component — "loaded once" is not "exercised over a
+  meaningful session."
 - **G2 — Wrap the residual ungated Janet surface.** The threat model
   (`docs/SANDBOX_THREAT_MODEL.md` §1) named the surface that v1 did
   NOT gate: `os/execute`, `os/spawn`, `file/*`, `net/*`, `native`,
@@ -84,14 +105,10 @@ substrate until both gates above close.
   `os/shell` + `stax-bash` (both gated on `exec`). The
   `REMOVED_BINDINGS` static list and the `G2 closure` test iterate the
   same set, so adding to one without the other will trip CI.
-  Status: `CLOSED 2026-05-19`. **v0.2.1 follow-up the same day** closed
-  the two named residual gaps (#6 env-var bindings, #7 ancillary
-  filesystem-metadata bindings) using the same `REMOVED_BINDINGS`
-  pattern: `os/getenv` / `os/setenv` / `os/environ` removed, and the
-  12 ancillary `os/` filesystem bindings (`stat`/`lstat`/`dir`/
-  `realpath`/`readlink`/`mkdir`/`rmdir`/`rm`/`rename`/`touch`/
-  `symlink`/`chmod`) removed. Static list now at 31 entries;
-  test iterates 31/31.
+  Status: `CLOSED 2026-05-19`, with later adversarial-review rounds
+  growing the list 31 → 65 → **73**. Residual retained primitives
+  (`compile` / `signal` / `debug/*`, selected `os/*` metadata) are
+  named in the threat model — they are not a silent reopen of G2.
 - **G3 — Soak time.** ≥30 days of continuous mast use as the daily
   editor for at least one real workflow (driving real-stax-CLI
   invocations, holding real buffers under real edits), with the
