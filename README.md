@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/SMC17/mast/actions/workflows/ci.yml/badge.svg)](https://github.com/SMC17/mast/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SMC17/mast?include_prereleases&sort=semver)](https://github.com/SMC17/mast/releases)
-[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or-later-blue.svg)](LICENSE)
 [![Zig](https://img.shields.io/badge/Zig-0.16-orange.svg)](https://ziglang.org/)
 
 > Single-binary editor kernel. Buffer-as-protocol. Janet-extensible. AGPL.
@@ -11,7 +11,7 @@
 
 The Emacs lesson — that any operation that touches the buffer should go through a public scriptable surface — applied as the load-bearing constraint, with the Zig host kept small enough (`src/` is readable end-to-end in an afternoon) that the buffer protocol is the integration story rather than a feature list.
 
-## Status — pre-1.0 substrate, hygiene milestone reached
+## Status — pre-1.0 substrate
 
 Despite the `v1.0.0` → `v1.5.0` git tag progression, mast is pre-1.0
 in semver spirit. Two independent reasons:
@@ -25,50 +25,53 @@ in semver spirit. Two independent reasons:
    / CI / CODE_OF_CONDUCT / dependabot / CODEOWNERS) — necessary, not
    sufficient, for "production-grade."
 
-What does work, green on Linux x86_64 + Apple Silicon arm64:
+Proof vocabulary used below: `sketch`, `scaffold`, `compiled`,
+`unit-tested`, `integration-tested`, `audited`, `benchmarked`,
+`hardware-verified`. Stronger words than the evidence are Type I.
 
-| Gate | Status | Evidence |
+What does work, measured on Linux x86_64 (Zig 0.16.0, 2026-08-20):
+
+| Gate | Proof | Evidence |
 |---|---|---|
-| Janet embeds cleanly in a Zig binary | done | vendored Janet, single binary, `zig build` green |
-| Buffer-as-protocol shape specified | done | `docs/buffer-protocol.md`, in-source tests in `src/buffer.zig` |
-| M-x command runner dispatches | done | `docs/SPEC.md`, in-source tests |
-| File-write buffer ops + atomic save | done | tmp + fsync + rename, unit-tested |
-| 7200-trial property corpus + buffer-protocol benchmark | done | see `BENCH.md` |
-| **G2 sandbox closure + 2-round adversarial review** (v1.3.0 → v1.3.4) | done | **65** dangerous Janet bindings removed via panic stubs; install + test iterate same static list; threat-model §6 residuals #6 (env), #7 (ancillary-fs), #13–#18 + #20 (adversarial-review-driven: file/* via os/open, FFI, audit JSON injection, ANSI escape injection, process-control, bytecode, agent/* DoS) all CLOSED |
-| **Resource quota — wall-clock** (v1.3.5) | done | SIGALRM + janet_interpreter_interrupt + MAST_EVAL_TIMEOUT_SEC env var (default 30s); `(while true 1)` cleanly interrupted; editor recovers without dying; closes threat-model §6 #8 wall-clock dimension |
-| **Multi-buffer ring** (v1.3.0) | done | `M-x list-buffers` / `next-buffer` / `prev-buffer` / `switch-buffer N` / `new-buffer <name>`; doctest-verified lifecycle |
-| **Agent-as-buffer — sync** (v1.3.0) | done | `(agent/run cmd)` + `M-x agent-run`: gated subprocess, capture stdout into `:agent` buffer |
-| **Agent-as-buffer — async + live-tail** (v1.3.0) | done | `(agent/spawn cmd)` → handle; `agent/poll` / `agent/wait` / `agent/count` / `agent/alive?`; `agent/wait` uses `poll(2)` on stdout_fd with 500ms backstop |
-| **In-house ANSI/termios TUI** (v1.3.0) | done | `mast --tui [file]`: alt-screen, raw-mode termios, line-numbered viewport, reverse-video status, minibuffer M-x with sentinel verbs |
-| **Sandbox-deny audit routing** (v1.3.x) | done | `sandbox.g_deny_observer` fires BEFORE `janet_panicf`; main routes to `SessionAudit` as `sandbox-deny` records with category tag |
-| **Host-cfunction regression discipline** (v1.3.x) | done | `tools/cfunction-audit.sh` enumerates every `janet_def` registration and FAILS on dangerous syscalls without cap-check; wired into `zig build test` |
-| **README/code drift discipline** | done | `tools/doctest.sh` 25/25 PASS against shipped binary; covers build steps, multi-buffer lifecycle, agent sync+async cycles, --tui launch, G2 panic observability, strict-mode integration |
-| **Skill system** (v1.5.0) | unit-tested | `src/skills.zig` 5 tests; scans `~/.config/mast/skills/**/*.janet`, parses comment-header frontmatter, capability-gate check before eval; 64KB cap, O_CLOEXEC, silent on missing dir |
-| **Plan substrate** (v1.5.0) | unit-tested | `src/plan.zig` 6 tests; `TaskStatus` state machine (pending→in\_progress→done→verified+blocked); `Plan.compact()` removes done+verified leaf tasks; append-only JSONL event log |
-| **Adversarial verification loop** (v1.5.0) | posture-observable | `verify/run`, `verify/buffer`, `verify/buffer-wait`; wires `stax-cross-agent-verification` 4-stage pipeline; `verify/buffer-wait` blocks, then opens `proofs/*.verified.md` as a new `:file` buffer; gated on `exec` |
-| **`plan/context`** (v1.5.0) | posture-observable | compact plan serialization (`[status] id: description` per task); designed for LLM prompt injection; confirmed correct via `(print (plan/context))` smoke |
+| Janet embeds in a Zig binary | `compiled` | vendored Janet, single binary, `zig build` |
+| Buffer-as-protocol | `unit-tested` | `docs/buffer-protocol.md`, in-source tests in `src/buffer.zig` |
+| M-x command runner | `unit-tested` | `docs/SPEC.md`, in-source tests |
+| File-write + atomic save | `unit-tested` | tmp + fsync + rename |
+| Buffer-protocol property corpus + bench | `benchmarked` | see `BENCH.md` (existing numbers; no new benches in this ship) |
+| G2 sandbox closure | `audited` (self-applied) + `unit-tested` | **73** dangerous Janet bindings removed via panic stubs; install + test iterate the same static list; not an independent review (G4 open) |
+| Resource quota — wall-clock | `integration-tested` | `tests/quota_integration.sh` 8/8 against the shipped binary |
+| Multi-buffer ring | `integration-tested` | `tools/doctest.sh` lifecycle |
+| Agent-as-buffer sync + async | `integration-tested` | `tools/doctest.sh` `agent/run` / `agent/spawn` / `agent/wait` |
+| In-house ANSI/termios TUI | `integration-tested` | `mast --tui [file]` doctest (alt-screen + `q` exit) |
+| Host-cfunction regression scan | `audited` (static) | `tools/cfunction-audit.sh` wired into `zig build test`; 2026-08-20: 35 cfunctions, 2 gated, 33 benign, 0 violations |
+| README/code drift | `integration-tested` | `zig build doctest` → `tools/doctest.sh` **25/25 PASS** (2026-08-20) |
+| Skill system | `unit-tested` | `src/skills.zig` 5 tests |
+| Plan substrate | `unit-tested` | `src/plan.zig` 7 tests |
+| Proof gate | `unit-tested` + `integration-tested` | `zig build test` → **180/180 tests passed** (Linux x86_64, 2026-08-20) |
+
+macOS arm64 is a CI target (`compiled` when that workflow is green). This
+session did not re-run macOS. Do not treat a Linux pass as a multi-OS soak.
 
 **Gates still open before "production-grade" honestly fits:**
 
 - **G1 — Real Janet script under load.** Partially closed:
-  `~/.config/mast/init.janet` is 207+ lines / 25+ verbs (including v1.5
-  skill/plan/verify surface) and loads cleanly. Soak time is the
-  missing piece.
+  in-tree `examples/init.janet` (178 lines) loads. Operator home-config
+  size is not a repo receipt. Soak time is the missing piece.
 - **G3 — Soak time.** ≥30 days of continuous use as the daily editor
   with audit log retained and reviewed for capability-deny anomalies.
-  Not yet started.
+  **Not yet started. Not claimed.**
 - **G4 — Independent security review.** Second pair of eyes on
   `src/sandbox.zig` + `docs/SANDBOX_THREAT_MODEL.md`. Not yet done.
-  Internal substitute (self-applied threat model + 80% mutation
-  score + `cfunction-audit.sh` static scan + 25/25 doctest) is the
-  strongest current substitute, not a replacement.
+  Internal substitute (self-applied threat model + mutation suite +
+  `cfunction-audit.sh` + 25/25 doctest) is the strongest current
+  substitute, not a replacement.
 - **G5 — Zig 1.0.** Out of this repo's control.
 
 Roadmap items still open: local-inference daemon, native Windows,
 TUI per-row damage tracking (frame-level shipped v1.3.2; row-level
-diff deferred to v0.4), `pidfd_open`/`kqueue` agent poll (current
-poll(2) backstop wakes every 500ms). See `CHANGELOG.md` for
-per-tag scope.
+diff deferred), `pidfd_open`/`kqueue` agent poll (current `poll(2)`
+backstop wakes every 500ms). See `CHANGELOG.md` for per-tag scope.
+Full proof index: `STATUS.md`.
 
 ## Build
 
@@ -80,6 +83,12 @@ zig build -Doptimize=ReleaseSmall
 ```
 
 The amalgamated Janet source (3.3 MB) is vendored at `vendored/janet/janet.c`; the Zig build compiles it directly. No external `make` required.
+
+Proof gate:
+
+```sh
+zig build test
+```
 
 ## Run
 
@@ -97,9 +106,12 @@ M-x display                    # render current buffer
 M-x append some new content    # append text + newline; marks buffer dirty
 M-x save                       # atomic write-back (tmp + fsync + rename)
 M-x save-as /tmp/new.md        # save to a new path; buffer becomes :file
-M-x stax-search "query here"   # delegates to stax-search if installed
+M-x stax-search hello          # delegates to stax-search if installed
 M-x exit
 ```
+
+The M-x dispatcher currently splits on whitespace. Quoted multi-word
+arguments are not parsed; use a single token or a Janet form.
 
 ### Atomic save
 
@@ -137,7 +149,9 @@ The eval happens before the REPL starts and any error is non-fatal — mast stil
 ## Agentic primitives (v1.5)
 
 Three interlocking systems shipped in v1.5.0. All require an `init.janet`
-that loads the surface (see `examples/init.janet` Section 7).
+that loads the surface (see `examples/init.janet` Section 7). Skills and
+plan are `unit-tested`. The verify verbs are gated on `exec` and require
+a locally installed verification pipeline; they are not a soak.
 
 ### Skills — Janet plugins from disk
 
@@ -161,7 +175,7 @@ M-x (skill/list)                             # array of {name description}
 M-x (skill/run "type1-audit" "notes.md")     # invoke by name; requires: exec gate enforced
 ```
 
-### Plan substrate — single source of truth for agent work
+### Plan substrate — session plan + append-only log
 
 ```
 M-x (plan/propose "implement X" nil "zig build test" "src/x.zig")
@@ -171,20 +185,21 @@ M-x (plan/propose "write tests" 1 "64 pass" "")
 M-x (plan/status 1 "done")
 M-x (plan/compact)                           # removes done+verified leaf tasks
   → 1                                        # tasks removed
-M-x (plan/context)                           # compact LLM-injectable string
+M-x (plan/context)                           # compact serialization
   → plan (1 active):
     [pending] 2: write tests
       verify: 64 pass
 ```
 
 Tasks persist only for the session; the JSONL event log at
-`~/.local/state/stax/plan-events.jsonl` is append-only.
+`$XDG_STATE_HOME/stax/plan-events.jsonl` (default
+`~/.local/state/stax/plan-events.jsonl`) is append-only.
 
 ### Adversarial verification loop
 
-Wires [`stax-cross-agent-verification`](https://github.com/SMC17/stax-cross-agent-verification)
-(4-stage adversarial pipeline) as a first-class mast tool. Requires the
-pipeline installed and the `exec` capability granted.
+Wires a 4-stage local verification pipeline as a mast tool. Requires the
+pipeline installed and the `exec` capability granted. This is not an
+independent security review (see G4).
 
 ```
 M-x (verify/run "path/to/claim.md")         # async; returns agent handle
@@ -210,34 +225,42 @@ What's been verified:
   flips the load-bearing `g_sandbox.has(.exec)` sense; the suite kills
   the mutant. M01 is the one that matters for the security claim; M08
   (fd-zero) and M10 (mark-clamp no-op) are documented as equivalent
-  mutants, not coverage gaps.
-- **Drift-proof removed-bindings list.** Every panic-stubbed Janet
-  binding (`os/execute`, `os/spawn`, `file/*`, `net/*`, `native`,
-  `unmarshal`, `os/exit`) is iterated by both the static
-  `REMOVED_BINDINGS` list and the `G2 closure` test. Adding to one
-  without the other trips CI.
+  mutants, not coverage gaps. Last recorded result: 8/10 killed.
+  Not re-run in this session.
+- **Drift-proof removed-bindings list.** 73 panic-stubbed Janet
+  bindings (`os/execute`, `os/spawn`, `file/*`, `net/*`, `native`,
+  `unmarshal`, `os/exit`, plus later adversarial-review closures)
+  are iterated by both the static `REMOVED_BINDINGS` list and the
+  `G2 closure` test. Adding to one without the other trips CI.
 - **Observable strict-mode posture.** `MAST_SANDBOX_STRICT=1` flips
-  the default-grant policy; the deny-by-default claim is now observable
-  end-to-end against the shipped binary, not just the test rig. The
-  5/5 strict-mode integration test runs in CI.
+  the default-grant policy; the deny-by-default claim is observable
+  against the shipped binary, not just the test rig. The 5/5
+  strict-mode integration test runs in `zig build test`.
 - **README/code drift check.** `tools/doctest.sh` runs the README's
-  example invocations against the shipped binary. 12/12 PASS as of
-  the last touched date in STATUS.md.
+  example invocations against the shipped binary. 25/25 PASS on
+  2026-08-20 (`zig build doctest`).
 
 ## Security / Sandbox
 
-The v1 sandbox is a **first slice of a capability model**, not OS isolation —
+The sandbox is a **Janet-script-level capability model**, not OS isolation —
 see `docs/SANDBOX_THREAT_MODEL.md` for the full posture, asset inventory,
-and explicit residual gaps. Today only `exec`-class bindings (`os/shell`
-and the host-bound `stax-bash`) are gated; `os/execute`, `os/spawn`,
-`file/*`, `net/*`, `native`, `unmarshal`, `os/exit` remain ungated and
-are tracked as v2 work.
+and explicit residual gaps.
+
+G2 (the named ungated surface from v1: `os/execute`, `os/spawn`,
+`file/*`, `net/*`, `native`, `unmarshal`, `os/exit`) is closed by
+*removal*: those symbols resolve to panic stubs. Subprocess is narrowed
+to `os/shell` + host-bound `stax-bash`, both gated on the `exec`
+capability. Residual gaps that remain (compile/signal/debug retained
+because removing them breaks the language; some `os/*` metadata
+bindings retained as low-severity) are listed in the threat model.
+They are not "ungated exec." Do not read "capability model" as
+"container."
 
 ### `MAST_SANDBOX_STRICT`
 
 Set `MAST_SANDBOX_STRICT=1` (also accepts `true`/`yes`/`on`,
-case-insensitive) to suppress the v1 host-policy auto-grant of `exec`.
-The production binary then runs in the same default-deny posture the
+case-insensitive) to suppress the host-policy auto-grant of `exec`.
+The shipped binary then runs in the same default-deny posture the
 sandbox unit tests prove on a fresh VM: any verb that shells out
 (`M-x stax-search`, `M-x stax-dashboard`, `M-x stax-hunger`,
 `(os/shell ...)`, `(stax-bash ...)`) fails loudly with
@@ -249,37 +272,40 @@ M-x stax-dashboard
   → error: mast.sandbox: stax-bash denied — capability `exec` not granted (default-deny)
 ```
 
-What strict mode buys you: the deny-by-default claim is now observable
+What strict mode buys you: the deny-by-default claim is observable
 end-to-end against the shipped binary, not just the test rig. What it
-does NOT buy you: defense against any of the `exec`-adjacent residual
-gaps (`os/execute`, `os/spawn`, `posix-fork`, `posix-exec`) — those are
-not gated at all in v1 and remain reachable under strict mode.
-`MAST_SANDBOX_STRICT=0` / unset / `false` / `no` / `off` leaves the
-default policy in place.
+does NOT buy you: OS isolation, defense against retained language
+primitives (`compile`, `signal`, `debug/*`), or G4 (independent
+review). `MAST_SANDBOX_STRICT=0` / unset / `false` / `no` / `off`
+leaves the default policy in place.
 
 ## Why "mast"
 
-A mast is the load-bearing spar everything hangs off — sails, rigging, cargo nets, flags. In the substrate metaphor it is the single primitive everything composes through: a buffer hangs off the protocol, an agent hangs off a buffer, an audit event hangs off an agent.
+A mast is the load-bearing spar everything hangs off — sails, rigging, cargo nets, flags. In the kernel metaphor it is the single primitive everything composes through: a buffer hangs off the protocol, an agent hangs off a buffer, an audit event hangs off an agent.
 
 ## Architecture
 
-See `docs/SPEC.md` for the full architectural sketch and `docs/STRATEGIC_POSITION.md` for the positioning vs Emacs / VS Code / Cursor. Highlights:
+See `docs/SPEC.md` for the architectural sketch and
+`docs/EXTENSIBILITY_LANGUAGE.md` for the Janet decision. Highlights:
 
-- **Buffer-as-protocol.** Every observable object exposes `read`, `write`, `subscribe`, `mark`, `mode`, `properties`. There is no second access path.
-- **Extensibility through Janet.** Janet was chosen because it embeds cleanly in a single Zig binary, supports interactive REPL evaluation against the live editor process, and exposes the buffer surface as a first-class scripting target. See `docs/EXTENSIBILITY_LANGUAGE.md` for the decision memo.
-- **Agent integration through CLIs, not network sockets.** Editor commands that invoke an agent route through locally-installed CLIs (`stax-spawn`, `stax-search`, etc.) — never directly to a frontier API. This is an architectural commitment, not a configuration option.
-- **Append-only audit log.** Every editor session writes to `~/.local/state/stax/editor-sessions/<session-id>.jsonl`. The substrate cannot lie to its future self about what it did.
+- **Buffer-as-protocol.** Every observable object exposes `read`, `write`, `subscribe`, `mark`, `mode`, `properties`. There is no second access path. This is a design commitment, not a property proven against adversarial input.
+- **Extensibility through Janet.** Janet was chosen because it embeds cleanly in a single Zig binary, supports interactive REPL evaluation against the live editor process, and exposes the buffer surface as a first-class scripting target.
+- **Agent integration through CLIs, not network sockets.** Editor commands that invoke an agent route through locally-installed CLIs — never directly to a frontier API. This is an architectural commitment, not a configuration option.
+- **Append-only audit log.** Every editor session writes to `$XDG_STATE_HOME/stax/editor-sessions/<session-id>.jsonl`. The kernel cannot lie to its future self about what it did.
 
 ## Honest risks — Type I and Type II
 
 **Type I — what could be overclaimed.** The v1.x git tags are a
-shipping-process hygiene milestone, not a maturity certificate. The
-mutation-suite-kills-M01 claim refers to *one* load-bearing mutation;
-8 of 10 mutations killed, 2 documented as equivalent — the residual
-surface is the 2-survivor classification. The "buffer-as-protocol"
-architectural framing reflects a design decision, not a property
-proven against adversarial input. The 7200-trial property corpus is
-on the buffer protocol, not on the Janet sandbox.
+shipping-process hygiene milestone, not a maturity certificate. This
+kernel is not a measured replacement for any other editor, and it has
+no published user count. The mutation-suite-kills-M01 claim refers to
+*one* load-bearing mutation; 8 of 10 mutations killed, 2 documented as
+equivalent — the residual surface is the 2-survivor classification.
+The "buffer-as-protocol" architectural framing reflects a design
+decision, not a property proven against adversarial input. The
+property corpus is on the buffer protocol, not on the Janet sandbox.
+G3 soak has not started. G4 independent review has not happened.
+Self-applied adversarial review is not external review.
 
 **Type II — what real risk might be missed.** A Janet embedding in a
 single-binary process has a fundamentally larger attack surface than
@@ -298,34 +324,23 @@ capability model alone.
 
 AGPL-3.0-or-later. See `LICENSE`.
 
-The license is the architecture, not the legal afterthought. AGPL from commit zero so the substrate is *absorbable* by larger players without being closed-forkable by them. Dual-licensing is not on the table for v1.0.
-
 The vendored Janet runtime stays under its original MIT license at `vendored/janet/LICENSE`.
 
 ## Contributing
 
-Issues and discussion welcome. The substrate is small enough to be read end-to-end in an hour. The clearest contribution paths right now are:
+Issues and discussion welcome. The kernel is small enough to be read
+end-to-end in an hour. Useful paths right now:
 
 1. Buffer-protocol refinements (see `docs/buffer-protocol.md`).
 2. Additional built-in M-x commands that compose with other local CLIs.
 3. Platform smoke tests on architectures other than x86_64 Linux / arm64 macOS.
-4. ~~TUI damage-tracker for partial redraws~~ — **shipped in v1.3.2**
-   via `tui.FrameState` + `tui.emit_with_damage`.
-5. ~~`agent/kill handle` for in-session cancellation~~ — **shipped in
-   v1.3.2** as `(agent/kill handle)` returning bool.
-6. ~~Skills system, plan substrate, adversarial verification loop~~ —
-   **shipped in v1.5.0** (`skill/*`, `plan/*`, `verify/*`; 11 new verbs).
-7. v0.4 vaxis re-evaluation post-Zig-1.0 (the v1.3.0 TUI is in-house
-   ANSI because the build doctrine is single-binary zero-Zig-deps; this
-   may relax once Zig 1.0 stabilizes the dep ecosystem).
-8. TUI per-row damage tracking (v1.3.2 ships frame-level diff —
+4. TUI per-row damage tracking (v1.3.2 ships frame-level diff —
    "skip emit if frame identical." Row-level diff would only emit
-   changed rows on large terminals; v0.4 work).
-9. Real `poll(2)` on both stdout_fd AND the child (`pidfd_open` on Linux,
-   `kqueue` on macOS) — v1.3.0 uses `poll(2)` on stdout_fd with a
-   500ms backstop waitpid, which is fine for handfuls of agents but
-   wakes the loop every 500ms even when nothing is happening.
-10. Skill persistence across sessions — the plan JSONL log persists; the
-    in-memory `Tasks` list does not. A `plan/restore` verb that replays
-    the log on startup would close the session-boundary gap.
+   changed rows on large terminals).
+5. Real `poll(2)` on both stdout_fd AND the child (`pidfd_open` on Linux,
+   `kqueue` on macOS) — current code uses `poll(2)` on stdout_fd with a
+   500ms backstop waitpid.
+6. Skill / plan persistence across sessions — the plan JSONL log
+   persists; the in-memory task list does not.
 
+Do not claim G3, G4, production-grade, or a user count in a PR.
