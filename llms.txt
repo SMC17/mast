@@ -1,0 +1,14 @@
+# mast (`SMC17/mast`)
+
+> Single-binary editor kernel in Zig 0.16 with buffer-as-protocol and Janet extensibility (AGPL-3.0-or-later).
+
+## Key Links
+- **Repository**: https://github.com/SMC17/mast
+- **Related (`zig-substrate`)**: https://github.com/SMC17/zinging
+- **Author / Org**: https://github.com/SMC17
+
+## Overview & Key Files
+- [README](README.md) & [Status](STATUS.md)
+- [Build](build.zig) & [Source](src)
+- [Tests](tests) & [Benchmarks](BENCH.md)
+- [API Stability](API_STABILITY.md)
