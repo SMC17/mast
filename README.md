@@ -1,5 +1,7 @@
 # mast
 
+**[Status](STATUS.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/SMC17/mast/issues) · [Public roadmap](https://github.com/users/SMC17/projects/16)**
+
 [![CI](https://github.com/SMC17/mast/actions/workflows/ci.yml/badge.svg)](https://github.com/SMC17/mast/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SMC17/mast?include_prereleases&sort=semver)](https://github.com/SMC17/mast/releases)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or-later-blue.svg)](LICENSE)
