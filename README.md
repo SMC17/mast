@@ -47,7 +47,7 @@ What does work, measured on Linux x86_64 (Zig 0.16.0, 2026-08-20):
 | README/code drift | `integration-tested` | `zig build doctest` → `tools/doctest.sh` **25/25 PASS** (2026-08-20) |
 | Skill system | `unit-tested` | `src/skills.zig` 5 tests |
 | Plan substrate | `unit-tested` | `src/plan.zig` 7 tests |
-| Proof gate | `unit-tested` + `integration-tested` | `zig build test` → **180/180 tests passed** (Linux x86_64, 2026-08-20) |
+| Proof gate | `unit-tested` + `integration-tested` | `zig build test` → **49/49 tests passed**, 16/16 steps (macOS arm64, 2026-11-17) |
 
 macOS arm64 is a CI target (`compiled` when that workflow is green). This
 session did not re-run macOS. Do not treat a Linux pass as a multi-OS soak.
