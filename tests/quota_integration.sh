@@ -23,6 +23,26 @@ if [ ! -x "$MAST_BIN" ]; then
     exit 2
 fi
 
+# timeout(1) is GNU coreutils and absent on stock macOS. Prefer it (or
+# Homebrew's gtimeout) when present; otherwise fall back to a watchdog
+# subshell that SIGTERMs the command after N seconds. The command is
+# exec'd in the foreground so it keeps the caller's stdin pipe.
+if command -v timeout >/dev/null 2>&1; then
+    run_timeout() { timeout "$@"; }
+elif command -v gtimeout >/dev/null 2>&1; then
+    run_timeout() { gtimeout "$@"; }
+else
+    run_timeout() {
+        local secs=$1
+        shift
+        (
+            target=$BASHPID
+            (sleep "$secs" && kill -TERM "$target") >/dev/null 2>&1 &
+            exec "$@"
+        )
+    }
+fi
+
 n_pass=0
 n_fail=0
 
@@ -45,7 +65,7 @@ echo "=== mast quota integration test ==="
 # If the process is still running after 10s, the quota didn't fire.
 
 t_start=$(date +%s)
-output=$(echo '(while true 1)' | timeout 10 \
+output=$(echo '(while true 1)' | run_timeout 10 \
     env MAST_EVAL_TIMEOUT_SEC=2 "$MAST_BIN" 2>&1) || true
 exit_status=$?
 t_end=$(date +%s)
@@ -76,7 +96,7 @@ fi
 # regression where the quota fires too early (eg. measuring from
 # process start instead of from janet_dostring entry).
 
-output_fast=$(echo '(+ 1 2)' | timeout 10 \
+output_fast=$(echo '(+ 1 2)' | run_timeout 10 \
     env MAST_EVAL_TIMEOUT_SEC=2 "$MAST_BIN" 2>&1) || true
 if echo "$output_fast" | grep -qE '→ 3( |$)'; then
     pass "fast expression (+ 1 2) returns → 3 without triggering quota"
@@ -102,7 +122,7 @@ trap "rm -rf $state_dir" EXIT
 unset MAST_EVAL_TIMEOUT_SEC
 output_default=$(echo '(+ 1 1)' | XDG_STATE_HOME="$state_dir/state" \
     XDG_CONFIG_HOME="$state_dir/config" \
-    timeout 10 "$MAST_BIN" 2>&1) || true
+    run_timeout 10 "$MAST_BIN" 2>&1) || true
 
 # Find the session audit log
 audit_file=$(find "$state_dir/state/stax/editor-sessions" -name '*.jsonl' 2>/dev/null | head -1)
@@ -129,7 +149,7 @@ fi
 # expression then EOFed.  This case sends multiple expressions in a
 # single session.
 
-multi_out=$(printf '(while true 1)\n(+ 2 40)\nexit\n' | timeout 10 \
+multi_out=$(printf '(while true 1)\n(+ 2 40)\nexit\n' | run_timeout 10 \
     env MAST_EVAL_TIMEOUT_SEC=2 "$MAST_BIN" 2>&1) || true
 # The (+ 2 40) line must return → 42 AFTER the interrupted (while ...).
 if echo "$multi_out" | grep -qE '→ 42( |$)'; then
@@ -151,7 +171,7 @@ fi
 #   3. The editor recovers cleanly
 
 t_start=$(date +%s)
-shell_out=$(echo '(os/shell "sleep 9999")' | timeout 10 \
+shell_out=$(echo '(os/shell "sleep 9999")' | run_timeout 10 \
     env MAST_EVAL_TIMEOUT_SEC=2 "$MAST_BIN" 2>&1) || true
 t_end=$(date +%s)
 elapsed=$((t_end - t_start))

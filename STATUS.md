@@ -16,9 +16,9 @@ Proof vocabulary (harness): `sketch`, `scaffold`, `compiled`,
 `tooled` is not a proof level; static scanners are `audited` (static)
 when they ran.
 
-Repo-level proof on 2026-08-20 (Linux x86_64, Zig 0.16.0):
-`zig build test --summary all` → **180/180 tests passed**.
-`zig build doctest` → **25/25 PASS**. That is `unit-tested` +
+Repo-level proof on 2026-11-17 (macOS arm64, Zig 0.16.0, fresh clone):
+`zig build test --summary all` → **16/16 steps succeeded; 49/49 tests passed**.
+On 2026-08-20 (Linux x86_64, Zig 0.16.0): `zig build doctest` → **25/25 PASS**. That is `unit-tested` +
 `integration-tested`. It is not G3 soak and not G4 independent review.
 Frontmatter `proof_level: unit-tested` is the strongest *repo-wide*
 word that this run supports. Sandbox rows may still say `audited`
